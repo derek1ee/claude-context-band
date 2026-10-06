@@ -87,6 +87,16 @@ const BAND = {
   props: { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 103, scroll: { offset: 0, bodyRows: 12 }, view: {} },
 } as const
 
+/** Moves the pointer to column `x` of the band and reads the tooltip shown there. */
+async function tipAt(ui: { pointer: (e: { type: 'move'; x: number; y: number; in: string }) => Promise<void>; find: (q: { type: string; key: string; in: string }) => Promise<{ text: string } | undefined> }, x: number) {
+  await ui.pointer({ type: 'move', x, y: 0, in: 'band' })
+  return (await ui.find({ type: 'Box', key: 'tip', in: 'band' }))?.text
+}
+
+// 103 columns: the button `↻ (n)` ends the row at 98-102, the label before it
+const BUTTON_X = 100
+const LABEL_X = 90
+
 const T0 = Date.parse('2026-10-06T00:00:00.000Z')
 
 /** The engine beneath the plugin: a TTL pinned in settings, and forks that read 150k from the cache. */
@@ -141,30 +151,30 @@ test('auto-refresh keeps an idle cache warm up to its count, and starts over on 
 
   // the settings pin the TTL, so the label shows from the first request
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: '5m-cache 5:00' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '5m-cache 5:00', in: 'band' })).toBeDefined()
   // the button counts the auto-refreshes left; each hover target has its own tooltip
-  expect((await ui.find({ type: 'Button', key: 'refresh' }))?.text).toBe('↻ (2)')
-  expect(await ui.find({ type: 'Text', text: ' Refresh cache now · auto-refresh: 2 of 2 left, next in 4m ' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^ 5m TTL · last request \d\d:\d\d:\d\d · expires \d\d:\d\d:\d\d $/ })).toBeDefined()
+  expect((await ui.find({ type: 'Button', key: 'refresh', in: 'band' }))?.text).toBe('↻ (2)')
+  expect(await tipAt(ui, BUTTON_X)).toBe(' Refresh cache now · auto-refresh: 2 of 2 left, next in 4m ')
+  expect(await tipAt(ui, LABEL_X)).toMatch(/^ 5m TTL · last request \d\d:\d\d:\d\d · expires \d\d:\d\d:\d\d $/)
 
   // 30 seconds before expiry the idle session refreshes; the countdown starts over
   await clock.advance(4 * MINUTE + 31_000)
   expect(world.forks).toBe(1)
   expect(world.toasts.at(-1)).toBe('Cache auto-refreshed (1 of 2): 150k tokens read from the cache.')
   // it fired at 0:30 left, a tick ago: the countdown restarted from 5:00
-  expect(await ui.find({ type: 'Text', text: '5m-cache 4:59' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '5m-cache 4:59', in: 'band' })).toBeDefined()
 
-  expect((await ui.find({ type: 'Button', key: 'refresh' }))?.text).toBe('↻ (1)')
+  expect((await ui.find({ type: 'Button', key: 'refresh', in: 'band' }))?.text).toBe('↻ (1)')
 
   await clock.advance(4 * MINUTE + 31_000)
   expect(world.forks).toBe(2)
-  expect((await ui.find({ type: 'Button', key: 'refresh' }))?.text).toBe('↻ (0)')
-  expect(await ui.find({ type: 'Text', text: ' Refresh cache now · auto-refresh: 0 of 2 left until your next prompt ' })).toBeDefined()
+  expect((await ui.find({ type: 'Button', key: 'refresh', in: 'band' }))?.text).toBe('↻ (0)')
+  expect(await tipAt(ui, BUTTON_X)).toBe(' Refresh cache now · auto-refresh: 0 of 2 left until your next prompt ')
 
   // the count is spent: the cache lapses
   await clock.advance(6 * MINUTE)
   expect(world.forks).toBe(2)
-  expect(await ui.find({ type: 'Text', text: /^cache expired/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^cache expired/, in: 'band' })).toBeDefined()
 
   // a prompt starts the count over, and its request warms the cache again
   await $.prompt.submit({ text: 'next', wait: false, origin: { kind: 'composer' } })
@@ -186,19 +196,20 @@ test('auto-refresh is off by default; the button and the command refresh by hand
   expect(world.forks).toBe(0)
 
   const ui = await $.ui.mount(BAND)
-  expect((await ui.find({ type: 'Button', key: 'refresh' }))?.text).toBe('↻ (0)')
-  expect(await ui.find({ type: 'Text', text: ' Refresh cache now · auto-refresh off ' })).toBeDefined()
+  expect((await ui.find({ type: 'Button', key: 'refresh', in: 'band' }))?.text).toBe('↻ (0)')
+  expect(await tipAt(ui, BUTTON_X)).toBe(' Refresh cache now · auto-refresh off ')
   await ui.press({ key: 'refresh' })
+  await clock.settle()
   expect(world.forks).toBe(1)
   expect(world.toasts.at(-1)).toBe('Cache refreshed: 150k tokens read from the cache.')
-  expect(await ui.find({ type: 'Text', text: '5m-cache 5:00' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '5m-cache 5:00', in: 'band' })).toBeDefined()
 
   expect((await run($, 'refresh')).text).toBe('Cache refreshed: 150k tokens read from the cache.')
   expect(world.forks).toBe(2)
 
   // once expired there is nothing to keep warm: no button
   await clock.advance(6 * MINUTE)
-  expect(await ui.find({ type: 'Button', key: 'refresh' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'refresh', in: 'band' })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -240,14 +251,14 @@ test('auto-refresh <n> is this session\'s own; reset follows the default; defaul
   expect(store.get('session-limit:session-a')).toEqual({ limit: 3, savedAt: T0 })
 
   const ui = await $.ui.mount(BAND)
-  expect((await ui.find({ type: 'Button', key: 'refresh' }))?.text).toBe('↻ (3)')
-  expect(await ui.find({ type: 'Text', text: /^ Refresh cache now · auto-refresh \(this session\): 3 of 3 left/ })).toBeDefined()
+  expect((await ui.find({ type: 'Button', key: 'refresh', in: 'band' }))?.text).toBe('↻ (3)')
+  expect(await tipAt(ui, BUTTON_X)).toMatch(/^ Refresh cache now · auto-refresh \(this session\): 3 of 3 left/)
 
   expect((await run($, 'auto-refresh')).text).toMatch(/^Auto-refresh for this session: up to 3 .* The default is off;/)
 
   // back to the default, and the stored count is gone
   expect((await run($, 'auto-refresh reset')).text).toBe('This session follows the default again: auto-refresh off.')
-  expect((await ui.find({ type: 'Button', key: 'refresh' }))?.text).toBe('↻ (0)')
+  expect((await ui.find({ type: 'Button', key: 'refresh', in: 'band' }))?.text).toBe('↻ (0)')
   expect(store.has('session-limit:session-a')).toBe(false)
 
   // the default for every session goes to settings
@@ -276,7 +287,7 @@ test('a resumed session takes up its own count; month-old counts are dropped', {
 
   const ui = await $.ui.mount(BAND)
   // its own 4 over the default 1
-  expect((await ui.find({ type: 'Button', key: 'refresh' }))?.text).toBe('↻ (4)')
+  expect((await ui.find({ type: 'Button', key: 'refresh', in: 'band' }))?.text).toBe('↻ (4)')
   expect(store.has('session-limit:session-old')).toBe(false)
   expect(store.get('session-limit:session-b')).toEqual({ limit: 4, savedAt: T0 - 1000 })
   expect(store.get('unrelated')).toBe('kept')
@@ -294,12 +305,12 @@ test('the TTL shows a moment after the first response, once Claude Code has save
   await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
   await $.classic.SessionStart({ source: 'startup', transcript_path: '/tmp/fresh.jsonl' })
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: 'no cache yet' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'no cache yet', in: 'band' })).toBeDefined()
 
   // the first request: the response's row is not saved yet
   await request($, 't1')
   await clock.settle()
-  expect(await ui.find({ type: 'Text', text: 'cache …' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'cache …', in: 'band' })).toBeDefined()
 
   // saved a moment later, with no further event: the next poll finds it
   tail = JSON.stringify({
@@ -308,7 +319,7 @@ test('the TTL shows a moment after the first response, once Claude Code has save
     message: { model: 'claude-opus-5-5', usage: { cache_creation: { ephemeral_1h_input_tokens: 4000, ephemeral_5m_input_tokens: 0 } } },
   })
   await clock.advance(3000)
-  expect(await ui.find({ type: 'Text', text: '1h-cache 59:57' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '1h-cache 59:57', in: 'band' })).toBeDefined()
   expect(world.forks).toBe(0)
   await ui.unmount()
 })

@@ -151,14 +151,26 @@ const BAND = {
   props: { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 103, scroll: { offset: 0, bodyRows: 12 }, view: {} },
 } as const
 
-/** The squares as drawn, in order, without their separating spaces. */
-async function squaresOf(ui: { findAll: (q: { type: string; text: RegExp }) => Promise<{ text: string }[]> }) {
-  // a run is glyphs each followed by a space; the legend's glyphs stand alone
-  const runs = await ui.findAll({ type: 'Text', text: /^([⛁⛀⛶⛝] )+$/ })
+type Drawn = {
+  findAll: (q: { type?: string; text?: string | RegExp; in?: string }) => Promise<{ text: string; key: string | undefined; props: Record<string, unknown> }[]>
+  find: (q: { type?: string; key?: string; text?: string | RegExp; in?: string }) => Promise<{ text: string; props: Record<string, unknown> } | undefined>
+  pointer: (e: { type: 'move' | 'enter' | 'leave'; x: number; y: number; in?: string }) => Promise<void>
+}
+
+/** The squares as the band's Client drew them, in order, without their separating spaces. */
+async function squaresOf(ui: Drawn) {
+  const runs = await ui.findAll({ type: 'Text', text: /^([⛁⛀⛃⛂⛶⛝] )+$/, in: 'band' })
   return runs
     .map(t => t.text)
     .join('')
     .replaceAll(' ', '')
+}
+
+/** Moves the pointer to column `x` of the band and reads the tooltip shown, with where it starts. */
+async function tipAt(ui: Drawn, x: number) {
+  await ui.pointer({ type: 'move', x, y: 0, in: 'band' })
+  const box = await ui.find({ type: 'Box', key: 'tip', in: 'band' })
+  return box === undefined ? undefined : { text: box.text, left: box.props.left }
 }
 
 const TRANSCRIPT_AT = Date.parse('2026-10-06T00:30:00.000Z')
@@ -201,23 +213,26 @@ test('the band draws on the terminal and the desktop, a draft shows, the cache c
     // 103 columns less the 23 kept for the label: 40 squares of 5k tokens each
     expect(await squaresOf(ui)).toBe('⛁'.repeat(12) + '⛶'.repeat(21) + '⛝'.repeat(7))
     // no request yet: the label says so, not an empty space
-    expect(await ui.find({ type: 'Text', text: 'no cache yet' })).toBeDefined()
-    // one tooltip per square, on the band's own row: what it is, its share, how big a square is
-    const systemTips = await ui.findAll({ type: 'Text', text: ' System prompt · 20k tokens · 10% of 200k ' })
-    expect(systemTips).toHaveLength(4)
-    expect(await ui.findAll({ type: 'Text', text: ' Autocompact buffer (kept for /compact) · 33k tokens · 17% of 200k ' })).toHaveLength(7)
-    // drawn after every square, so a revealed one paints over its neighbours
-    const boxes = await ui.findAll({ type: 'Box' })
-    const keys = boxes.map(b => b.key ?? '')
-    expect(keys.indexOf('tip-0')).toBeGreaterThan(keys.indexOf('sq-39'))
-    // square 0's tip starts on square 1; the last square's ends on the one before it
-    expect(boxes.find(b => b.key === 'tip-0')?.props).toMatchObject({ position: 'absolute', top: 0, left: 2, display: 'none' })
-    // 40 squares: the last glyph is column 78, and no tip reaches the cache label past it
-    // the last free square (32, columns 64-65) has no room after: its 40-wide tip ends on square 31
+    expect(await ui.find({ type: 'Text', text: 'no cache yet', in: 'band' })).toBeDefined()
+    // no tooltip until the pointer is over something
+    expect(await ui.find({ type: 'Box', key: 'tip', in: 'band' })).toBeUndefined()
+
+    // square 0 (columns 0-1): its tooltip starts on square 1
+    expect(await tipAt(ui, 1)).toEqual({ text: ' System prompt · 20k tokens · 10% of 200k ', left: 2 })
+    // the pointer follows by column, wherever a tooltip is drawn: moving right onto
+    // square 3, under square 0's tooltip, shows square 3's
+    expect((await tipAt(ui, 6))?.left).toBe(8)
+    // 40 squares: the last glyph is column 78, and no tooltip reaches the cache label past it.
+    // The last free square (32, columns 64-65) has no room after: its 40-wide tooltip ends on square 31
     expect(' Free space · 107k tokens · 54% of 200k '.length).toBe(40)
-    expect(boxes.find(b => b.key === 'tip-32')?.props.left).toBe(64 - 40)
-    // the last square's 67-wide tip ends on the square before it
-    expect(boxes.find(b => b.key === 'tip-39')?.props.left).toBe(78 - 67)
+    expect(await tipAt(ui, 64)).toEqual({ text: ' Free space · 107k tokens · 54% of 200k ', left: 64 - 40 })
+    // the last square's 67-wide tooltip ends on the square before it
+    expect(await tipAt(ui, 78)).toEqual({ text: ' Autocompact buffer (kept for /compact) · 33k tokens · 17% of 200k ', left: 78 - 67 })
+    // the label's tooltip, before the label area
+    expect((await tipAt(ui, 100))?.text).toBe(' Prompt cache: the countdown starts with your first prompt ')
+    // off the band: none
+    await ui.pointer({ type: 'leave', x: 100, y: 0, in: 'band' })
+    expect(await ui.find({ type: 'Box', key: 'tip', in: 'band' })).toBeUndefined()
     await ui.unmount()
   }
 
@@ -227,7 +242,8 @@ test('the band draws on the terminal and the desktop, a draft shows, the cache c
   let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   // 10k draft tokens after 60k used reach square 14 of 5k each
   expect(await squaresOf(ui)).toBe('⛁'.repeat(12) + '⛶'.repeat(2) + '⛶'.repeat(19) + '⛝'.repeat(7))
-  expect(await ui.find({ type: 'Text', text: ' Prompt draft (typed, not sent) · ~10k tokens · 5.0% of 200k ' })).toBeDefined()
+  // square 12, the first of the draft
+  expect((await tipAt(ui, 24))?.text).toBe(' Prompt draft (typed, not sent) · ~10k tokens · 5.0% of 200k ')
   await ui.unmount()
 
   // a main-loop request arms the countdown; its response tells the TTL
@@ -239,12 +255,13 @@ test('the band draws on the terminal and the desktop, a draft shows, the cache c
   await clock.settle()
   await clock.advance(61_000)
   ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: '5m-cache 3:59' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^ 5m TTL · last request \d\d:\d\d:\d\d · expires \d\d:\d\d:\d\d $/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '5m-cache 3:59', in: 'band' })).toBeDefined()
+  // the label sits before the button: `5m-cache 3:59` at columns 84-96, `↻ (0)` at 98-102
+  expect((await tipAt(ui, 90))?.text).toMatch(/^ 5m TTL · last request \d\d:\d\d:\d\d · expires \d\d:\d\d:\d\d $/)
   await clock.advance(240_000)
-  expect(await ui.find({ type: 'Text', text: 'cache expired <1m ago' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'cache expired <1m ago', in: 'band' })).toBeDefined()
   await clock.advance(36 * 60_000)
-  expect(await ui.find({ type: 'Text', text: 'cache expired 36m ago' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'cache expired 36m ago', in: 'band' })).toBeDefined()
   await ui.unmount()
 
   // the legend, for terminals without hover

@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { CacheInfo, CacheTtl, CtxRow } from '../types'
+import type { BandClientProps } from './band-client'
 import type { TurnPhase } from './layout'
 import {
   LABEL_WIDTH,
@@ -447,8 +448,19 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // The band's refresh button lives in its Client, which posts here when pressed.
+  on('ui.message', async ($, e, next) => {
+    const data: unknown = e.data
+    if (e.element === 'band' && typeof data === 'object' && data !== null && (data as { refresh?: unknown }).refresh === true) {
+      void refreshCache($, false).then(message => $.ui.toast(message))
+    }
+    return next(e)
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
+    // The row is a Client, which the terminal and the desktop draw.
+    if (e.surface !== 'terminal' && e.surface !== 'desktop') return next(e)
     const c = await read($, ctx)
     if (c === null) return next(e)
 
@@ -460,7 +472,7 @@ export const register: Register = (on, options) => {
     const used = await read($, refreshes)
     const { limit: autoNow, isSession } = await limitNow($)
     const refreshing = await read($, isRefreshing)
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Client } = $.ui.resolve(e)
 
     const columns = e.props.bodyColumns
     const n = squaresFor(columns - RESERVE)
@@ -468,87 +480,51 @@ export const register: Register = (on, options) => {
     const runs = layout(c, n, typed, grown)
     const label = cacheLabel(info, t)
 
-    // One entry per square: the run it belongs to and its tooltip. A square the
-    // turn added says so first, and names the solid glyph so it can be learned.
-    const squares = runs.flatMap(run =>
-      run.glyphs.map(glyph => ({ run, glyph, text: ` ${describeAdded(run, c.window, phase, isNewGlyph(glyph))} ` })),
-    )
-    // The label and the refresh button show while the TTL is known; the
-    // button only while there is a warm entry to keep alive.
-    const isWarm = info !== null && info.ttl !== null && info.touchedAt + TTL_MS[info.ttl] > t
-    const cacheTip = ` ${describeCache(info, t)} `
-    const refreshTip = info !== null && isWarm ? ` ${describeRefresh(info, t, autoNow, used, e.props.isWorking, isSession)} ` : undefined
+    // Tooltip texts, each kept once; squares and the label point at theirs.
+    const tips: BandClientProps['tips'] = []
+    const tipIndex = new Map<string, number>()
+    const tipOf = (text: string, color: string): number => {
+      const key = `${color} ${text}`
+      const known = tipIndex.get(key)
+      if (known !== undefined) return known
+      tips.push({ text, color })
+      tipIndex.set(key, tips.length - 1)
+      return tips.length - 1
+    }
 
-    // Tooltips reach no further right than the last square's glyph.
+    // Square tooltips reach no further right than the last square's glyph. A
+    // square the turn added says so first, and names the solid glyph so it can be learned.
     const limit = n * 2 - 1
+    const squares: BandClientProps['squares'] = []
+    for (const run of runs) {
+      for (const glyph of run.glyphs) {
+        const text = ` ${describeAdded(run, c.window, phase, isNewGlyph(glyph))} `
+        squares.push({ tip: tipOf(text, run.color), x: tipLeft(squares.length, text.length, limit) })
+      }
+    }
 
-    // Each square and its tooltip share a hover scope. The tooltips are drawn
-    // last, after every square, so the one revealed paints over its neighbours;
-    // they stay on the band's row, which the band's site clips to.
-    return (
-      <Box flexDirection="row" justifyContent="space-between" width={columns}>
-        <Box flexDirection="row">
-          {squares.map(({ run, glyph }, i) => (
-            <Box key={`sq-${i}`} hover={{ scope: `sq-${i}` }}>
-              {run.kind === 'free' ? <Text dimColor>{`${glyph} `}</Text> : <Text color={run.color}>{`${glyph} `}</Text>}
-            </Box>
-          ))}
-        </Box>
-        <Box key="cache" flexDirection="row" justifyContent="flex-end" gap={1} width={LABEL_WIDTH}>
-          <Box key="cache-label" hover={{ scope: 'cache' }}>
-            <Text color={label.color} inverse={label.inverse}>
-              {label.text}
-            </Text>
-          </Box>
-          {isWarm ? (
-            <Box key="refresh-button" hover={{ scope: 'refresh' }}>
-              <Button
-                key="refresh"
-                label={`${refreshing ? '…' : '↻'} (${refreshesLeft(autoNow, used)})`}
-                plain
-                dimColor
-                onPress={() => {
-                  void refreshCache($, false).then(message => $.ui.toast(message))
-                }}
-              />
-            </Box>
-          ) : null}
-        </Box>
-        {squares.map(({ run, text }, i) => (
-          <Box
-            key={`tip-${i}`}
-            position="absolute"
-            top={0}
-            left={tipLeft(i, text.length, limit)}
-            display="none"
-            hover={{ display: 'flex', scope: `sq-${i}` }}
-          >
-            <Text color={run.color} inverse>
-              {text}
-            </Text>
-          </Box>
-        ))}
-        {[
-          { key: 'tip-cache', scope: 'cache', text: cacheTip, color: label.color },
-          { key: 'tip-refresh', scope: 'refresh', text: refreshTip, color: 'text' },
-        ].map(tip =>
-          tip.text === undefined ? null : (
-            // ends where the cache area begins, over the right end of the squares
-            <Box
-              key={tip.key}
-              position="absolute"
-              top={0}
-              left={Math.max(0, columns - LABEL_WIDTH - tip.text.length)}
-              display="none"
-              hover={{ display: 'flex', scope: tip.scope }}
-            >
-              <Text color={tip.color} inverse>
-                {tip.text}
-              </Text>
-            </Box>
-          ),
-        )}
-      </Box>
-    )
+    // The label's and the button's tooltips end where the label area begins.
+    const tipBefore = (text: string) => Math.max(0, columns - LABEL_WIDTH - text.length)
+    const cacheTip = ` ${describeCache(info, t)} `
+    // The button shows only while there is a warm entry to keep alive.
+    const isWarm = info !== null && info.ttl !== null && info.touchedAt + TTL_MS[info.ttl] > t
+    const refreshTip = info !== null && isWarm ? ` ${describeRefresh(info, t, autoNow, used, e.props.isWorking, isSession)} ` : null
+
+    const band: BandClientProps = {
+      columns,
+      labelWidth: LABEL_WIDTH,
+      runs: runs.map(run => ({ text: run.text, color: run.color, dim: run.kind === 'free' })),
+      squares,
+      tips,
+      label: { ...label, tip: tipOf(cacheTip, label.color), x: tipBefore(cacheTip) },
+      button:
+        refreshTip === null
+          ? null
+          : { text: `${refreshing ? '…' : '↻'} (${refreshesLeft(autoNow, used)})`, tip: tipOf(refreshTip, 'text'), x: tipBefore(refreshTip) },
+    }
+
+    // The Client follows the pointer by column, so a tooltip never stands
+    // between the pointer and the square under it.
+    return <Client key="band" module="./band-client.tsx" props={band} width={columns} height={1} />
   })
 }

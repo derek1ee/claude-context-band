@@ -38,7 +38,7 @@ Squares, glyphs and colours follow `/context` exactly, with as many squares as f
 - `⛃` (and `⛂` for a part-full square) are the solid forms of the same squares. They mark what the current turn has added, and once it ends, what the last turn added, until your next prompt starts another. Each category that grew ends in round(growth ÷ square size) solid squares, at least one. That's usually Messages, but loading MCP tool schemas or a nested `CLAUDE.md` mid-turn grows those categories too. Changes under 100 tokens are treated as estimate noise and aren't marked.
 - `⛶` dim is free space, and `⛝` is the autocompact buffer at the right end.
 - `⛶` in the messages colour is what's typed in the prompt box but not sent yet (≈ 4 chars/token).
-- Hover any square (fullscreen or desktop) for a one-line tooltip on the band's own row, starting on the next square if it fits before the last square, else ending on the previous one, so it never covers the cache label: category, tokens and % of the window (`Custom agents · 212 tokens · <0.1% of 1.0M`). A solid square says what the turn added (`⛃ added last turn: Messages +6.2k · now 81k tokens, 41% of 200k`), and the category's other squares end with `+6.2k last turn (⛃)`. Hover the cache label for the TTL and the last-request and expiry times, and the `↻ (n)` button for auto-refresh status.
+- Hover any square (fullscreen or desktop) for a one-line tooltip on the band's own row, starting on the next square if it fits before the last square, else ending on the previous one, so it never covers the cache label. The band reads which square is under the pointer by column, so a tooltip never blocks the squares under it: sweep left or right and it follows square by square. It shows the category, tokens and % of the window category, tokens and % of the window (`Custom agents · 212 tokens · <0.1% of 1.0M`). A solid square says what the turn added (`⛃ added last turn: Messages +6.2k · now 81k tokens, 41% of 200k`), and the category's other squares end with `+6.2k last turn (⛃)`. Hover the cache label for the TTL and the last-request and expiry times, and the `↻ (n)` button for auto-refresh status.
 - `/context-band` prints the same legend in any terminal, with a `Last turn (⛃): Messages +6.2k · MCP tools +1.4k` line; `/context-band refresh` and `/context-band auto-refresh` are under Keeping the cache warm.
 
 ## Cache countdown
@@ -49,7 +49,7 @@ Squares, glyphs and colours follow `/context` exactly, with as many squares as f
 
 ## Keeping the cache warm
 
-The `↻ (n)` button beside the countdown refreshes the cache now. Click it (fullscreen terminal or desktop), or focus the band with ctrl+x tab and press Enter. `/context-band refresh` does the same from the prompt. The button shows only while the cache is still warm. `n` is how many auto-refreshes are left: `↻ (0)` means auto-refresh is off or used up, and the button still refreshes by hand.
+The `↻ (n)` button beside the countdown refreshes the cache now. Click it (fullscreen terminal or desktop), or run `/context-band refresh` from the prompt, which works in any terminal. The button shows only while the cache is still warm. `n` is how many auto-refreshes are left: `↻ (0)` means auto-refresh is off or used up, and the button still refreshes by hand.
 
 Hovering the button shows where auto-refresh stands, for example `Refresh cache now · auto-refresh: 2 of 3 left, next in 52m`, or `auto-refresh (this session): …` when the session has its own count.
 
@@ -74,7 +74,7 @@ Setting a session's count starts its allowance over. A session's own count lasts
 ## Surfaces and platforms
 
 - The band shows on the terminal CLI and the desktop app's Code tab. VS Code and mobile don't draw the above-prompt band.
-- Hover tooltips need a surface that reports the mouse: the fullscreen terminal or the desktop app. Elsewhere, run `/context-band`.
+- Hover tooltips and clicking `↻ (n)` need a surface that reports the mouse: the fullscreen terminal or the desktop app. Elsewhere, `/context-band` prints the legend and `/context-band refresh` refreshes the cache.
 - On macOS and Linux the transcript's tail is read with `tail`. On Windows the whole transcript is read instead, which works up to 4 MiB; past that the TTL can't be read and the cache label stays hidden.
 
 ## Privacy

@@ -97,8 +97,12 @@ test('the squares a turn adds are solid, through the turn and until the next one
   on('session.measure', ($, e) => ({ changed: e.changed }))
 
   const measure = () => $.session.measure({ context: { window: 200_000 }, rateLimits: [], changed: ['context'] })
-  const squares = async (ui: { findAll: (q: { type: string; text: RegExp }) => Promise<{ text: string }[]> }) =>
-    (await ui.findAll({ type: 'Text', text: /^[⛁⛀⛃⛂⛶⛝] $/ })).map(t => t.text.trim()).join('')
+  const squares = async (ui: { findAll: (q: { type: string; text: RegExp; in: string }) => Promise<{ text: string }[]> }) =>
+    (await ui.findAll({ type: 'Text', text: /^([⛁⛀⛃⛂⛶⛝] )+$/, in: 'band' })).map(t => t.text.replaceAll(' ', '')).join('')
+  const tipAt = async (x: number) => {
+    await ui.pointer({ type: 'move', x, y: 0, in: 'band' })
+    return (await ui.find({ type: 'Box', key: 'tip', in: 'band' }))?.text
+  }
 
   await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount(BAND)
@@ -110,8 +114,9 @@ test('the squares a turn adds are solid, through the turn and until the next one
   messages = 52_000
   await measure()
   expect(await squares(ui)).toBe('⛁'.repeat(12) + '⛃'.repeat(2) + '⛶'.repeat(26))
-  expect(await ui.find({ type: 'Text', text: ' ⛃ added last turn: Messages +12k · now 52k tokens, 26% of 200k ' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: ' Messages · 52k tokens · 26% of 200k · +12k last turn (⛃) ' })).toBeDefined()
+  // squares 12-13 are the new ones; 4-11 are Messages from before
+  expect(await tipAt(24)).toBe(' ⛃ added last turn: Messages +12k · now 52k tokens, 26% of 200k ')
+  expect(await tipAt(10)).toBe(' Messages · 52k tokens · 26% of 200k · +12k last turn (⛃) ')
 
   // the turn ends: the marks stay as the last turn's
   await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' })
