@@ -14,7 +14,18 @@ At a Claude Code terminal prompt:
 /plugin install context-band --marketplace derek1ee/claude-context-band
 ```
 
-Answer `y` to add the marketplace, then pick a scope (user scope loads it in every session). The band appears above the prompt right away, with no restart.
+Answer `y` to add the marketplace, then pick a scope (user scope loads it in every session). The band appears above the prompt right away, with no restart. Sessions that were already open pick it up after `/reload-plugins`.
+
+### From a shell
+
+For setup scripts, dotfiles or a new machine. The shell's `install` has no `--marketplace` flag, so the marketplace is added first:
+
+```sh
+claude plugin marketplace add derek1ee/claude-context-band
+claude plugin install context-band@claude-context-band   # user scope by default; -s project|local for others
+```
+
+To update later: `claude plugin update context-band`, then `/reload-plugins` in open sessions.
 
 **Requirements:** a Claude Code build with the function-hooks API; built and tested on 2.1.290. That API is early access and may change between releases, so another version may not load it or a future update may break it. Please open an issue if it does.
 
