@@ -3,7 +3,7 @@
 A Claude Code plugin that draws one full-width row of squares above the prompt, showing context-window use by category, plus a prompt-cache countdown on the right.
 
 ```
-⛁ ⛁ ⛁ ⛁ ⛀ ⛁ ⛁ ⛁ ⛁ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛝ ⛝ ⛝ ⛝   cache 1h 52:13 ↻ (3)
+⛁ ⛁ ⛁ ⛁ ⛀ ⛁ ⛁ ⛁ ⛁ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛝ ⛝ ⛝ ⛝   1h-cache 52:13 ↻ (3)
 ```
 
 ## Install
@@ -38,32 +38,37 @@ Squares, glyphs and colours follow `/context` exactly, with as many squares as f
 - `⛶` dim is free space, and `⛝` is the autocompact buffer at the right end.
 - `⛶` in the messages colour is what's typed in the prompt box but not sent yet (≈ 4 chars/token).
 - Hover any square (fullscreen or desktop) for a one-line tooltip on the band's own row, starting on the next square if it fits before the last square, else ending on the previous one, so it never covers the cache label: category, tokens and % of the window (`Custom agents · 212 tokens · <0.1% of 1.0M`). Hover the cache label for the TTL and the last-request and expiry times, and the `↻ (n)` button for auto-refresh status.
-- `/context-band` prints the same legend in any terminal; `/context-band refresh` and `/context-band auto-refresh <n>` are under Keeping the cache warm.
+- `/context-band` prints the same legend in any terminal; `/context-band refresh` and `/context-band auto-refresh` are under Keeping the cache warm.
 
 ## Cache countdown
 
 - **Expiry** = start of the last main-thread API request + TTL. A request that reads the cache restarts its timer, and the timer runs from when the request starts. Subagent requests don't count.
 - **TTL** comes from the transcript: each response's `usage.cache_creation` splits written tokens into `ephemeral_1h_input_tokens` and `ephemeral_5m_input_tokens`. If you pin the TTL yourself (`FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, or `"promptCacheTtl"` in settings), the label shows it from the first request. Otherwise the label reads `no cache yet` before your first prompt, then `cache …` until the first response is saved (a second or two), rather than counting down against a guess. Claude Code's automatic TTL is 1h on a Claude subscription within its usage limits and 5m on an API key, Bedrock, Vertex or Foundry. A drop to 5m mid-session (going past usage limits) is picked up at the end of that turn.
-- Green `cache 1h 52:13` while warm, yellow in the last 20%, then red `cache expired 36m ago` (rough: `<1m`, minutes, hours, days). A 1h cache also flashes through its last five minutes.
+- Green `1h-cache 52:13` while warm, yellow in the last 20%, then red `cache expired 36m ago` (rough: `<1m`, minutes, hours, days). A 1h cache also flashes through its last five minutes.
 
 ## Keeping the cache warm
 
 The `↻ (n)` button beside the countdown refreshes the cache now. Click it (fullscreen terminal or desktop), or focus the band with ctrl+x tab and press Enter. `/context-band refresh` does the same from the prompt. The button shows only while the cache is still warm. `n` is how many auto-refreshes are left: `↻ (0)` means auto-refresh is off or used up, and the button still refreshes by hand.
 
-Hovering the button shows where auto-refresh stands, for example `Refresh cache now · auto-refresh: 2 of 3 left, next in 52m`.
+Hovering the button shows where auto-refresh stands, for example `Refresh cache now · auto-refresh: 2 of 3 left, next in 52m`, or `auto-refresh (this session): …` when the session has its own count.
 
 A refresh re-sends the main conversation's last request with one extra line ("Reply with only: OK"), the way Claude Code itself does for side questions. The API serves the whole conversation from the cache, which restarts its timer. Nothing is added to your conversation, and a toast says how many tokens were read from the cache.
 
 A refresh costs one cache read of the context (0.1× the input price on most models, 0.05× on Opus 5.5) plus a few output tokens. On a subscription it counts toward your usage limits. If the cache lapses instead, your next prompt writes it again at 1.25× (5m) or 2× (1h).
 
-**Auto-refresh** is off by default. Turn it on with a count:
+**Auto-refresh** is off by default. Turn it on for the session you're in, or set a default for every session:
 
 ```
-/context-band auto-refresh 3    # refresh up to 3 times while idle
-/context-band auto-refresh 0    # off
+/context-band auto-refresh 3            # this session: refresh up to 3 times while idle
+/context-band auto-refresh 0            # this session: off, even if the default is on
+/context-band auto-refresh reset        # this session: follow the default again
+/context-band auto-refresh default 2    # the default for every session
+/context-band auto-refresh              # show both
 ```
 
-While the session is idle, it refreshes just before expiry (2 minutes early for 1h, 30 seconds for 5m), up to that many times. The count starts over each time you send a prompt, so a session you've walked away from stops after `n` refreshes. With 1h that's about `n` more hours warm; with 5m, about `5 × n` minutes. The same setting appears as "Cache auto-refresh" in `/config`, and `/context-band auto-refresh` with no number shows the current value. Each auto-refresh shows a toast like `Cache auto-refreshed (1 of 3): 236k tokens read from the cache.`
+While the session is idle, it refreshes just before expiry (2 minutes early for 1h, 30 seconds for 5m), up to that many times. The count starts over each time you send a prompt, so a session you've walked away from stops after `n` refreshes. With 1h that's about `n` more hours warm; with 5m, about `5 × n` minutes. Each auto-refresh shows a toast like `Cache auto-refreshed (1 of 3): 236k tokens read from the cache.`
+
+Setting a session's count starts its allowance over. A session's own count lasts through `/clear` and plugin reloads, and comes back when you reopen that conversation with `--resume` or `--continue`. It's kept by session ID, so `--fork-session` starts from the default. Counts for conversations untouched for 30 days are dropped. The default is the "Cache auto-refresh" row in `/config`.
 
 ## Surfaces and platforms
 

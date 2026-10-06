@@ -35,6 +35,8 @@ declare module 'claude-code' {
       refreshes: number
       /** A keep-alive fork is in flight. */
       isRefreshing: boolean
+      /** This session's auto-refresh count, over the default; null follows the default. */
+      sessionLimit: number | null
     }
   }
 }

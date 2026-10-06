@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, SessionContextBreakdown } from 'claude-code'
 
-import { cacheLabel, configuredTtl, parseCount, shouldAutoRefresh } from '../hooks/layout'
+import { cacheLabel, configuredTtl, parseAutoRefresh, parseCount, shouldAutoRefresh } from '../hooks/layout'
 
 const MINUTE = 60_000
 
@@ -10,8 +10,8 @@ describe('flashing', () => {
   const at = 1_000_000
   test('a 1h entry flashes through its last five minutes, a second on, a second off', () => {
     expect(cacheLabel({ touchedAt: at, ttl: '1h' }, at + 54 * MINUTE).inverse).toBe(false) // 6:00 left
-    expect(cacheLabel({ touchedAt: at, ttl: '1h' }, at + 56 * MINUTE)).toMatchObject({ text: 'cache 1h 4:00', inverse: true })
-    expect(cacheLabel({ touchedAt: at, ttl: '1h' }, at + 56 * MINUTE + 1000)).toMatchObject({ text: 'cache 1h 3:59', inverse: false })
+    expect(cacheLabel({ touchedAt: at, ttl: '1h' }, at + 56 * MINUTE)).toMatchObject({ text: '1h-cache 4:00', inverse: true })
+    expect(cacheLabel({ touchedAt: at, ttl: '1h' }, at + 56 * MINUTE + 1000)).toMatchObject({ text: '1h-cache 3:59', inverse: false })
   })
 
   test('a 5m entry never flashes', () => {
@@ -39,6 +39,17 @@ describe('auto-refresh rules', () => {
     expect(configuredTtl(undefined, undefined, '5m')).toBe('5m')
     expect(configuredTtl('0', undefined, undefined)).toBeNull()
     expect(configuredTtl(undefined, 'bogus', 7)).toBeNull()
+  })
+
+  test('auto-refresh takes <n>, reset, or default <n>', () => {
+    expect(parseAutoRefresh([])).toEqual({ kind: 'show' })
+    expect(parseAutoRefresh(['3'])).toEqual({ kind: 'session', count: 3 })
+    expect(parseAutoRefresh(['0'])).toEqual({ kind: 'session', count: 0 })
+    expect(parseAutoRefresh(['reset'])).toEqual({ kind: 'reset' })
+    expect(parseAutoRefresh(['default', '2'])).toEqual({ kind: 'default', count: 2 })
+    for (const bad of [['default'], ['default', 'x'], ['3', '4'], ['reset', '1'], ['-1'], ['100']]) {
+      expect(parseAutoRefresh(bad)).toEqual({ kind: 'invalid' })
+    }
   })
 
   test('the command takes a whole count from 0 to 99', () => {
@@ -130,7 +141,7 @@ test('auto-refresh keeps an idle cache warm up to its count, and starts over on 
 
   // the settings pin the TTL, so the label shows from the first request
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: 'cache 5m 5:00' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '5m-cache 5:00' })).toBeDefined()
   // the button counts the auto-refreshes left; each hover target has its own tooltip
   expect((await ui.find({ type: 'Button', key: 'refresh' }))?.text).toBe('↻ (2)')
   expect(await ui.find({ type: 'Text', text: ' Refresh cache now · auto-refresh: 2 of 2 left, next in 4m ' })).toBeDefined()
@@ -141,7 +152,7 @@ test('auto-refresh keeps an idle cache warm up to its count, and starts over on 
   expect(world.forks).toBe(1)
   expect(world.toasts.at(-1)).toBe('Cache auto-refreshed (1 of 2): 150k tokens read from the cache.')
   // it fired at 0:30 left, a tick ago: the countdown restarted from 5:00
-  expect(await ui.find({ type: 'Text', text: 'cache 5m 4:59' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '5m-cache 4:59' })).toBeDefined()
 
   expect((await ui.find({ type: 'Button', key: 'refresh' }))?.text).toBe('↻ (1)')
 
@@ -180,11 +191,9 @@ test('auto-refresh is off by default; the button and the command refresh by hand
   await ui.press({ key: 'refresh' })
   expect(world.forks).toBe(1)
   expect(world.toasts.at(-1)).toBe('Cache refreshed: 150k tokens read from the cache.')
-  expect(await ui.find({ type: 'Text', text: 'cache 5m 5:00' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '5m-cache 5:00' })).toBeDefined()
 
-  const run = (args: string) =>
-    $.command.run({ command: 'context-band', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 103 } })
-  expect((await run('refresh')).text).toBe('Cache refreshed: 150k tokens read from the cache.')
+  expect((await run($, 'refresh')).text).toBe('Cache refreshed: 150k tokens read from the cache.')
   expect(world.forks).toBe(2)
 
   // once expired there is nothing to keep warm: no button
@@ -193,24 +202,85 @@ test('auto-refresh is off by default; the button and the command refresh by hand
   await ui.unmount()
 })
 
-test('/context-band auto-refresh sets the one option', async ($, on) => {
+/** `$.store` from a Map the test can read, in place of mock.store's hidden one. */
+function memoryStore(on: On, entries: Record<string, unknown> = {}): Map<string, unknown> {
+  const store = new Map(Object.entries(entries))
+  on('store.get', ($, e) => ({ value: store.get(e.key) }))
+  on('store.set', ($, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('store.delete', ($, e) => {
+    store.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  return store
+}
+
+const run = ($: Engine, args: string) =>
+  $.command.run({ command: 'context-band', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 103 } })
+
+test('auto-refresh <n> is this session\'s own; reset follows the default; default <n> sets it for all', async ($, on) => {
   mock.clock(on, { now: T0 })
   mock.env(on, {})
+  const store = memoryStore(on)
   const world = engine(on, '1h')
+  on('session.id', () => ({ value: 'session-a' }))
   await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  await request($, 't1')
 
-  const run = (args: string) =>
-    $.command.run({ command: 'context-band', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 103 } })
+  expect((await run($, 'auto-refresh')).text).toBe(
+    "Auto-refresh: off (the default). /context-band auto-refresh <n> sets this session's own.",
+  )
 
-  expect((await run('auto-refresh')).text).toMatch(/^Auto-refresh is off/)
-  expect((await run('auto-refresh 3')).text).toMatch(/^Auto-refresh on: up to 3 /)
-  expect((await run('auto-refresh 0')).text).toBe('Auto-refresh off.')
-  expect(world.configSet).toEqual([
-    { key: 'context-band.autoRefresh', value: 3 },
-    { key: 'context-band.autoRefresh', value: 0 },
-  ])
-  expect((await run('auto-refresh lots')).text).toMatch(/^Usage/)
-  expect((await run('bogus')).text).toMatch(/^Usage/)
+  // this session only: no settings write, kept in the store under the session id
+  expect((await run($, 'auto-refresh 3')).text).toMatch(/^Auto-refresh for this session: up to 3 .* Other sessions keep the default \(off\)\.$/)
+  expect(world.configSet).toEqual([])
+  expect(store.get('session-limit:session-a')).toEqual({ limit: 3, savedAt: T0 })
+
+  const ui = await $.ui.mount(BAND)
+  expect((await ui.find({ type: 'Button', key: 'refresh' }))?.text).toBe('↻ (3)')
+  expect(await ui.find({ type: 'Text', text: /^ Refresh cache now · auto-refresh \(this session\): 3 of 3 left/ })).toBeDefined()
+
+  expect((await run($, 'auto-refresh')).text).toMatch(/^Auto-refresh for this session: up to 3 .* The default is off;/)
+
+  // back to the default, and the stored count is gone
+  expect((await run($, 'auto-refresh reset')).text).toBe('This session follows the default again: auto-refresh off.')
+  expect((await ui.find({ type: 'Button', key: 'refresh' }))?.text).toBe('↻ (0)')
+  expect(store.has('session-limit:session-a')).toBe(false)
+
+  // the default for every session goes to settings
+  expect((await run($, 'auto-refresh default 2')).text).toBe('Default auto-refresh for every session: up to 2 keep-alive refreshes while idle.')
+  expect(world.configSet).toEqual([{ key: 'context-band.autoRefresh', value: 2 }])
+
+  for (const bad of ['auto-refresh lots', 'auto-refresh default', 'auto-refresh 3 4', 'auto-refresh reset 3', 'bogus']) {
+    expect((await run($, bad)).text).toMatch(/^Usage/)
+  }
+  await ui.unmount()
+})
+
+test('a resumed session takes up its own count; month-old counts are dropped', { options: { autoRefresh: 1 } }, async ($, on) => {
+  mock.clock(on, { now: T0 })
+  mock.env(on, {})
+  const store = memoryStore(on, {
+    'session-limit:session-b': { limit: 4, savedAt: T0 - 1000 },
+    'session-limit:session-old': { limit: 2, savedAt: T0 - 31 * 24 * 60 * MINUTE },
+    unrelated: 'kept',
+  })
+  engine(on, '1h')
+  on('session.id', () => ({ value: 'session-b' }))
+
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  await request($, 't1')
+
+  const ui = await $.ui.mount(BAND)
+  // its own 4 over the default 1
+  expect((await ui.find({ type: 'Button', key: 'refresh' }))?.text).toBe('↻ (4)')
+  expect(store.has('session-limit:session-old')).toBe(false)
+  expect(store.get('session-limit:session-b')).toEqual({ limit: 4, savedAt: T0 - 1000 })
+  expect(store.get('unrelated')).toBe('kept')
+  await ui.unmount()
 })
 
 test('the TTL shows a moment after the first response, once Claude Code has saved it', async ($, on) => {
@@ -238,7 +308,7 @@ test('the TTL shows a moment after the first response, once Claude Code has save
     message: { model: 'claude-opus-5-5', usage: { cache_creation: { ephemeral_1h_input_tokens: 4000, ephemeral_5m_input_tokens: 0 } } },
   })
   await clock.advance(3000)
-  expect(await ui.find({ type: 'Text', text: 'cache 1h 59:57' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '1h-cache 59:57' })).toBeDefined()
   expect(world.forks).toBe(0)
   await ui.unmount()
 })

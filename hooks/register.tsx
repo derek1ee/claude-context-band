@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { CacheTtl, CtxRow } from '../types'
+import type { CacheInfo, CacheTtl, CtxRow } from '../types'
 import {
   LABEL_WIDTH,
   RESERVE,
@@ -12,14 +12,17 @@ import {
   describeRefresh,
   describeRun,
   estimateTokens,
+  SESSION_LIMIT_KEEP_MS,
+  SESSION_LIMIT_PREFIX,
   formatTokens,
   layout,
   legendText,
-  parseCount,
+  parseAutoRefresh,
   parseTail,
   refreshesLeft,
   shouldAutoRefresh,
   squaresFor,
+  storedLimit,
   tipLeft,
 } from './layout'
 
@@ -29,6 +32,7 @@ const now = atom({ plugin: 'context-band', key: 'now' } as const, 0)
 const draft = atom({ plugin: 'context-band', key: 'draft' } as const, 0)
 const refreshes = atom({ plugin: 'context-band', key: 'refreshes' } as const, 0)
 const isRefreshing = atom({ plugin: 'context-band', key: 'isRefreshing' } as const, false)
+const sessionLimit = atom({ plugin: 'context-band', key: 'sessionLimit' } as const, null)
 
 /** Enough of the transcript's end to hold the last few responses. */
 const TAIL_BYTES = 1024 * 1024
@@ -54,7 +58,7 @@ let isMeasureDirty = false
 let lastSquares = 50
 /** The TTL the settings or environment pin, when they do; else only a response tells. */
 let settingsTtl: CacheTtl | null = null
-/** The `autoRefresh` option: how many keep-alive refreshes an idle stretch may spend. */
+/** The `autoRefresh` option: the default count of keep-alive refreshes an idle stretch may spend. */
 let autoLimit = 0
 let lastAutoAttempt = 0
 let lastTtlPoll = 0
@@ -186,7 +190,7 @@ async function refreshCache($: EngineInterface, isAuto: boolean): Promise<string
     const used = isAuto ? await update($, refreshes, n => n + 1) : 0
     const startedAt = await $.clock.now()
     const reply = await $.model.fork({ prompt: KEEP_WARM_PROMPT })
-    const which = isAuto ? `Cache auto-refreshed (${used} of ${autoLimit})` : 'Cache refreshed'
+    const which = isAuto ? `Cache auto-refreshed (${used} of ${(await limitNow($)).limit})` : 'Cache refreshed'
     if (!reply.isAnswered && reply.reason === 'nothing-to-fork') return 'Nothing is cached yet: the session has no response to refresh.'
     const usage = 'usage' in reply ? reply.usage : undefined
     const hit = usage?.cache_read_input_tokens ?? 0
@@ -202,20 +206,89 @@ async function refreshCache($: EngineInterface, isAuto: boolean): Promise<string
   }
 }
 
-/** The `/context-band auto-refresh <n>` answer: sets the one option, 0 for off. */
-async function setAutoRefresh($: EngineInterface, value: string | undefined): Promise<string> {
-  if (value === undefined) {
-    return autoLimit > 0
-      ? `Auto-refresh is on: up to ${autoLimit} keep-alive refreshes while idle, counted again from each prompt you send. /context-band auto-refresh 0 turns it off.`
-      : 'Auto-refresh is off. /context-band auto-refresh <n> keeps the cache warm up to n times while idle.'
+/** The auto-refresh count in force: this session's own when it set one, else the default. */
+async function limitNow($: EngineInterface): Promise<{ limit: number; isSession: boolean }> {
+  const own = await read($, sessionLimit)
+  return own === null ? { limit: autoLimit, isSession: false } : { limit: own, isSession: true }
+}
+
+/**
+ * Sets this session's own count (null follows the default again) and keeps it
+ * in the store under the session's id, so `--resume` and `--continue`, which
+ * keep the id, bring it back. A new count starts a fresh allowance.
+ */
+async function setSessionLimit($: EngineInterface, limit: number | null, sessionId?: string): Promise<void> {
+  await update($, sessionLimit, () => limit)
+  await update($, refreshes, () => 0)
+  await saveSessionLimit($, limit, sessionId)
+}
+
+async function saveSessionLimit($: EngineInterface, limit: number | null, sessionId?: string): Promise<void> {
+  try {
+    const key = `${SESSION_LIMIT_PREFIX}${sessionId ?? (await $.session.id())}`
+    if (limit === null) await $.store.delete(key)
+    else await $.store.set(key, { limit, savedAt: await $.clock.now() })
+  } catch {
+    // kept for this window only
   }
-  const count = parseCount(value)
-  if (count === null) return 'Usage: /context-band auto-refresh <n>, where n is 0 (off) to 99.'
-  const result = await $.config.set({ key: 'context-band.autoRefresh', value: count })
-  if (result.deny !== undefined) return `Auto-refresh unchanged: ${result.deny}`
-  return count === 0
-    ? 'Auto-refresh off.'
-    : `Auto-refresh on: up to ${count} keep-alive refreshes while idle, each just before the cache expires, counted again from each prompt you send.`
+}
+
+/** Takes up the count a session saved, when it is resumed; drops counts left untouched for a month. */
+async function loadSessionLimit($: EngineInterface, sessionId?: string): Promise<void> {
+  try {
+    const id = sessionId ?? (await $.session.id())
+    const saved = storedLimit(await $.store.get(`${SESSION_LIMIT_PREFIX}${id}`))
+    await update($, sessionLimit, () => saved?.limit ?? null)
+
+    const t = await $.clock.now()
+    for (const key of await $.store.keys()) {
+      if (!key.startsWith(SESSION_LIMIT_PREFIX)) continue
+      const old = storedLimit(await $.store.get(key))
+      if (old === null || t - old.savedAt > SESSION_LIMIT_KEEP_MS) await $.store.delete(key)
+    }
+  } catch {
+    // no store here: the session follows the default
+  }
+}
+
+async function describeRefreshNow($: EngineInterface, info: CacheInfo, t: number, working: boolean): Promise<string> {
+  const { limit, isSession } = await limitNow($)
+  return describeRefresh(info, t, limit, await read($, refreshes), working, isSession)
+}
+
+function describeLimit(limit: number): string {
+  return limit === 0 ? 'off' : `up to ${limit} keep-alive refreshes while idle`
+}
+
+/**
+ * `/context-band auto-refresh …`: `<n>` for this session, `reset` back to the
+ * default, `default <n>` for every session, nothing to show both.
+ */
+async function autoRefreshCommand($: EngineInterface, words: readonly string[]): Promise<string> {
+  const command = parseAutoRefresh(words)
+  const own = await read($, sessionLimit)
+  switch (command.kind) {
+    case 'show':
+      return own === null
+        ? `Auto-refresh: ${describeLimit(autoLimit)} (the default). /context-band auto-refresh <n> sets this session's own.`
+        : `Auto-refresh for this session: ${describeLimit(own)}. The default is ${describeLimit(autoLimit)}; /context-band auto-refresh reset follows it again.`
+    case 'session':
+      await setSessionLimit($, command.count)
+      return command.count === 0
+        ? 'Auto-refresh off for this session.'
+        : `Auto-refresh for this session: ${describeLimit(command.count)}, each just before the cache expires, counted again from each prompt you send. Other sessions keep the default (${autoLimit === 0 ? 'off' : autoLimit}).`
+    case 'reset':
+      await setSessionLimit($, null)
+      return `This session follows the default again: auto-refresh ${describeLimit(autoLimit)}.`
+    case 'default': {
+      const result = await $.config.set({ key: 'context-band.autoRefresh', value: command.count })
+      if (result.deny !== undefined) return `Default unchanged: ${result.deny}`
+      const note = own === null ? '' : ` This session keeps its own (${own}) until /context-band auto-refresh reset.`
+      return `Default auto-refresh for every session: ${describeLimit(command.count)}.${note}`
+    }
+    case 'invalid':
+      return 'Usage: /context-band auto-refresh [<n> | reset | default <n>], n from 0 (off) to 99.'
+  }
 }
 
 /** Writes the draft's estimate only when it moves, so most keystrokes redraw nothing. */
@@ -244,28 +317,29 @@ export const register: Register = (on, options) => {
           void readTranscript($)
         }
         if (isWorking || t - lastAutoAttempt < AUTO_RETRY_MS) return
-        if (!shouldAutoRefresh(c, t, autoLimit, await read($, refreshes))) return
+        if (!shouldAutoRefresh(c, t, (await limitNow($)).limit, await read($, refreshes))) return
         lastAutoAttempt = t
         $.ui.toast(await refreshCache($, true))
       })()
     })
 
     await readSettingsTtl($)
+    await loadSessionLimit($)
     await refreshContext($)
     void readTranscript($)
     await $.command.register({
       name: 'context-band',
       description: "Explains the context band's squares, refreshes the prompt cache, or sets auto-refresh",
-      argumentHint: '[refresh | auto-refresh <n>]',
+      argumentHint: '[refresh | auto-refresh [<n> | reset | default <n>]]',
     })
     return started
   })
 
   on('command.run', { command: 'context-band' }, async ($, e) => {
-    const [sub = '', value] = e.args.trim().split(/\s+/)
-    if (sub === 'auto-refresh') return { text: await setAutoRefresh($, value) }
-    if (sub === 'refresh') return { text: await refreshCache($, false) }
-    if (sub !== '') return { text: 'Usage: /context-band [refresh | auto-refresh <n>]' }
+    const [sub = '', ...words] = e.args.trim().split(/\s+/).filter(word => word !== '')
+    if (sub === 'auto-refresh') return { text: await autoRefreshCommand($, words) }
+    if (sub === 'refresh' && words.length === 0) return { text: await refreshCache($, false) }
+    if (sub !== '') return { text: 'Usage: /context-band [refresh | auto-refresh [<n> | reset | default <n>]]' }
 
     const c = await read($, ctx)
     if (c === null) return { text: 'Context band: no breakdown yet.' }
@@ -274,7 +348,7 @@ export const register: Register = (on, options) => {
     const cacheLine =
       info === null || info.ttl === null
         ? describeCache(info, t)
-        : `Prompt cache: ${describeCache(info, t)}\nRefresh: ${describeRefresh(info, t, autoLimit, await read($, refreshes), isWorking)}`
+        : `Prompt cache: ${describeCache(info, t)}\nRefresh: ${await describeRefreshNow($, info, t, isWorking)}`
     return { text: `${legendText(c, lastSquares, await read($, draft))}\n\n${cacheLine}` }
   })
 
@@ -292,6 +366,9 @@ export const register: Register = (on, options) => {
     if (e.transcript_path !== '') transcriptPath = e.transcript_path
     void (async () => {
       if (e.source === 'clear') await update($, cache, () => null)
+      // /clear keeps this window's own count under the new id; /resume takes up the resumed one's
+      if (e.source === 'clear') await saveSessionLimit($, await read($, sessionLimit), e.session_id)
+      if (e.source === 'resume') await loadSessionLimit($, e.session_id)
       await readTranscript($)
       await refreshContext($)
     })()
@@ -358,6 +435,7 @@ export const register: Register = (on, options) => {
     const t = await read($, now)
     const typed = await read($, draft)
     const used = await read($, refreshes)
+    const { limit: autoNow, isSession } = await limitNow($)
     const refreshing = await read($, isRefreshing)
     const { Box, Button, Text } = $.ui.resolve(e)
 
@@ -376,7 +454,7 @@ export const register: Register = (on, options) => {
     // button only while there is a warm entry to keep alive.
     const isWarm = info !== null && info.ttl !== null && info.touchedAt + TTL_MS[info.ttl] > t
     const cacheTip = ` ${describeCache(info, t)} `
-    const refreshTip = info !== null && isWarm ? ` ${describeRefresh(info, t, autoLimit, used, e.props.isWorking)} ` : undefined
+    const refreshTip = info !== null && isWarm ? ` ${describeRefresh(info, t, autoNow, used, e.props.isWorking, isSession)} ` : undefined
 
     // Tooltips reach no further right than the last square's glyph.
     const limit = n * 2 - 1
@@ -403,7 +481,7 @@ export const register: Register = (on, options) => {
             <Box key="refresh-button" hover={{ scope: 'refresh' }}>
               <Button
                 key="refresh"
-                label={`${refreshing ? '…' : '↻'} (${refreshesLeft(autoLimit, used)})`}
+                label={`${refreshing ? '…' : '↻'} (${refreshesLeft(autoNow, used)})`}
                 plain
                 dimColor
                 onPress={() => {

@@ -1,6 +1,6 @@
 {
   "name": "context-band",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Context-window squares by category above the prompt, with a prompt-cache countdown and an optional keep-warm refresh. Reads the context breakdown, the prompt draft's length and the session transcript's cache usage, all locally; a refresh (manual, or auto-refresh if enabled) sends one model request through Claude Code.",
   "author": {
     "name": "Derek Li",
@@ -20,7 +20,7 @@
     "autoRefresh": {
       "type": "number",
       "title": "Cache auto-refresh",
-      "description": "While the session is idle, keep the prompt cache warm by refreshing it just before it expires, up to this many times; the count starts over when you send a prompt. Each refresh is one cache read of the context, billed as usage. 0 turns it off. Also set with /context-band auto-refresh <n>.",
+      "description": "The default for every session: while idle, keep the prompt cache warm by refreshing it just before it expires, up to this many times; the count starts over when you send a prompt. Each refresh is one cache read of the context, billed as usage. 0 turns it off. /context-band auto-refresh default <n> sets this too; /context-band auto-refresh <n> overrides it for one session.",
       "default": 0
     }
   },

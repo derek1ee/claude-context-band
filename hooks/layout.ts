@@ -209,7 +209,7 @@ export function cacheLabel(cache: CacheInfo | null, now: number): { text: string
 
   const color = remaining <= TTL_MS[cache.ttl] * 0.2 ? 'warning' : 'success'
   const isFlashing = cache.ttl === '1h' && remaining <= FLASH_MS
-  return { text: `cache ${cache.ttl} ${clock(remaining)}`, color, inverse: isFlashing && Math.ceil(remaining / 1000) % 2 === 0 }
+  return { text: `${cache.ttl}-cache ${clock(remaining)}`, color, inverse: isFlashing && Math.ceil(remaining / 1000) % 2 === 0 }
 }
 
 /** How long before expiry an auto-refresh fires: room for the request to land. */
@@ -262,15 +262,63 @@ export function refreshesLeft(limit: number, used: number): number {
 }
 
 /** The refresh button's tooltip, one line: what a press does, and where auto-refresh stands. */
-export function describeRefresh(cache: CacheInfo, now: number, limit: number, used: number, isWorking: boolean): string {
-  if (limit <= 0) return 'Refresh cache now · auto-refresh off'
+export function describeRefresh(
+  cache: CacheInfo,
+  now: number,
+  limit: number,
+  used: number,
+  isWorking: boolean,
+  isSessionLimit = false,
+): string {
+  const auto = isSessionLimit ? 'auto-refresh (this session)' : 'auto-refresh'
+  if (limit <= 0) return `Refresh cache now · ${auto} off`
   const left = refreshesLeft(limit, used)
-  if (left === 0) return `Refresh cache now · auto-refresh: 0 of ${limit} left until your next prompt`
+  if (left === 0) return `Refresh cache now · ${auto}: 0 of ${limit} left until your next prompt`
   const ttl = cache.ttl ?? '5m'
   const nextAt = cache.touchedAt + TTL_MS[ttl] - REFRESH_LEAD_MS[ttl]
   const when = isWorking ? 'next once idle' : nextAt > now ? `next in ${ago(nextAt - now)}` : 'next now'
-  return `Refresh cache now · auto-refresh: ${left} of ${limit} left, ${when}`
+  return `Refresh cache now · ${auto}: ${left} of ${limit} left, ${when}`
 }
+
+/** What `/context-band auto-refresh …` asks for. */
+export type AutoRefreshCommand =
+  | { kind: 'show' }
+  | { kind: 'session'; count: number }
+  | { kind: 'reset' }
+  | { kind: 'default'; count: number }
+  | { kind: 'invalid' }
+
+/**
+ * Reads the words after `auto-refresh`: nothing shows the values, `<n>` sets
+ * this session's count, `reset` returns this session to the default, and
+ * `default <n>` sets the default every session follows.
+ */
+export function parseAutoRefresh(words: readonly string[]): AutoRefreshCommand {
+  const [first, second, ...rest] = words
+  if (first === undefined) return { kind: 'show' }
+  if (rest.length > 0) return { kind: 'invalid' }
+  if (first === 'reset' && second === undefined) return { kind: 'reset' }
+  if (first === 'default') {
+    const count = second === undefined ? null : parseCount(second)
+    return count === null ? { kind: 'invalid' } : { kind: 'default', count }
+  }
+  const count = second === undefined ? parseCount(first) : null
+  return count === null ? { kind: 'invalid' } : { kind: 'session', count }
+}
+
+/** Where a session's own count is kept in the plugin's store, by session id, so `--resume` finds it. */
+export const SESSION_LIMIT_PREFIX = 'session-limit:'
+
+/** A stored session count, as `$.store` hands it back: anything else reads as none. */
+export function storedLimit(value: unknown): { limit: number; savedAt: number } | null {
+  if (typeof value !== 'object' || value === null) return null
+  const { limit, savedAt } = value as { limit?: unknown; savedAt?: unknown }
+  if (typeof limit !== 'number' || typeof savedAt !== 'number') return null
+  return { limit, savedAt }
+}
+
+/** Session counts not touched for this long are dropped: that conversation is unlikely to be resumed. */
+export const SESSION_LIMIT_KEEP_MS = 30 * 24 * 60 * 60_000
 
 type TranscriptRow = {
   type?: string
