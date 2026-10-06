@@ -112,9 +112,9 @@ describe('cache', () => {
     expect(cacheLabel(null, at).text).toBe('')
     expect(cacheLabel({ touchedAt: at, ttl: null }, at + 61_000).text).toBe('')
 
-    expect(cacheLabel({ touchedAt: at, ttl: '1h' }, at)).toEqual({ text: 'cache 1h 60:00', color: 'success' })
-    expect(cacheLabel({ touchedAt: at, ttl: '5m' }, at + 250_000)).toEqual({ text: 'cache 5m 0:50', color: 'warning' })
-    expect(cacheLabel({ touchedAt: at, ttl: '5m' }, at + 300_000)).toEqual({ text: 'cache expired <1m ago', color: 'error' })
+    expect(cacheLabel({ touchedAt: at, ttl: '1h' }, at)).toMatchObject({ text: 'cache 1h 60:00', color: 'success' })
+    expect(cacheLabel({ touchedAt: at, ttl: '5m' }, at + 250_000)).toMatchObject({ text: 'cache 5m 0:50', color: 'warning' })
+    expect(cacheLabel({ touchedAt: at, ttl: '5m' }, at + 300_000)).toMatchObject({ text: 'cache expired <1m ago', color: 'error' })
     expect(cacheLabel({ touchedAt: at, ttl: '1h' }, at + 96 * 60_000).text).toBe('cache expired 36m ago')
     expect(cacheLabel({ touchedAt: at, ttl: '1h' }, at + 3 * 3600_000 + 59 * 60_000).text).toBe('cache expired 2h ago')
     expect(cacheLabel({ touchedAt: at, ttl: '5m' }, at + 50 * 3600_000).text).toBe('cache expired 2d ago')

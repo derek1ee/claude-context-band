@@ -31,6 +31,10 @@ declare module 'claude-code' {
       now: number
       /** Estimated tokens of what is typed in the prompt box, not yet sent. */
       draft: number
+      /** Auto-refreshes spent since the person last sent a prompt. */
+      refreshes: number
+      /** A keep-alive fork is in flight. */
+      isRefreshing: boolean
     }
   }
 }

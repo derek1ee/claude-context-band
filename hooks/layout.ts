@@ -188,21 +188,57 @@ export function ago(ms: number): string {
   return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`
 }
 
+/** How long before a 1h entry expires the label starts flashing. 5m entries never flash. */
+export const FLASH_MS = 5 * 60_000
+
 /**
  * The right-hand label: the time left while warm, how long ago it lapsed once
- * expired. Empty until a response in the transcript shows which TTL bucket
- * the session writes to, so it never counts down against a guess.
+ * expired. Empty until the TTL is known (a response in the transcript, or the
+ * settings), so it never counts down against a guess. A 1h entry flashes,
+ * reversing each second, through its last five minutes.
  */
-export function cacheLabel(cache: CacheInfo | null, now: number): { text: string; color: string } {
-  if (cache === null || cache.ttl === null) return { text: '', color: 'inactive' }
+export function cacheLabel(cache: CacheInfo | null, now: number): { text: string; color: string; inverse: boolean } {
+  if (cache === null || cache.ttl === null) return { text: '', color: 'inactive', inverse: false }
 
   const expiry = cache.touchedAt + TTL_MS[cache.ttl]
   const remaining = expiry - Math.max(now, cache.touchedAt)
 
-  if (remaining <= 0) return { text: `cache expired ${ago(-remaining)} ago`, color: 'error' }
+  if (remaining <= 0) return { text: `cache expired ${ago(-remaining)} ago`, color: 'error', inverse: false }
 
   const color = remaining <= TTL_MS[cache.ttl] * 0.2 ? 'warning' : 'success'
-  return { text: `cache ${cache.ttl} ${clock(remaining)}`, color }
+  const isFlashing = cache.ttl === '1h' && remaining <= FLASH_MS
+  return { text: `cache ${cache.ttl} ${clock(remaining)}`, color, inverse: isFlashing && Math.ceil(remaining / 1000) % 2 === 0 }
+}
+
+/** How long before expiry an auto-refresh fires: room for the request to land. */
+export const REFRESH_LEAD_MS: Record<CacheTtl, number> = { '5m': 30_000, '1h': 2 * 60_000 }
+
+/**
+ * Whether an idle session should refresh its cache now: auto-refresh is on with
+ * refreshes left, the TTL is known, and the entry is warm but inside the lead.
+ */
+export function shouldAutoRefresh(cache: CacheInfo | null, now: number, limit: number, used: number): boolean {
+  if (limit <= 0 || used >= limit || cache === null || cache.ttl === null) return false
+  const remaining = cache.touchedAt + TTL_MS[cache.ttl] - now
+  return remaining > 0 && remaining <= REFRESH_LEAD_MS[cache.ttl]
+}
+
+/**
+ * The main conversation's TTL as Claude Code settles it, when it is set
+ * explicitly: FORCE_PROMPT_CACHING_5M, then CLAUDE_CODE_PROMPT_CACHE_TTL, then
+ * the `promptCacheTtl` setting. Unset means automatic, which only a response shows.
+ */
+export function configuredTtl(force5m: string | undefined, env: string | undefined, setting: unknown): CacheTtl | null {
+  if (force5m !== undefined && force5m !== '' && force5m !== '0' && force5m.toLowerCase() !== 'false') return '5m'
+  if (env === '5m' || env === '1h') return env
+  if (setting === '5m' || setting === '1h') return setting
+  return null
+}
+
+/** A count for `/context-band auto-refresh <n>`: a whole number from 0 to 99, else null. */
+export function parseCount(text: string): number | null {
+  if (!/^\d{1,2}$/.test(text.trim())) return null
+  return Number(text.trim())
 }
 
 function timeOfDay(ms: number): string {
@@ -215,6 +251,22 @@ export function describeCache(cache: CacheInfo, now: number): string {
   const ttl = cache.ttl ?? '5m'
   const expiry = cache.touchedAt + TTL_MS[ttl]
   return `${ttl} TTL · last request ${timeOfDay(cache.touchedAt)} · ${expiry > now ? 'expires' : 'expired'} ${timeOfDay(expiry)}`
+}
+
+/** Auto-refreshes left in this idle stretch: 0 when off or spent. The button shows it as `↻ (n)`. */
+export function refreshesLeft(limit: number, used: number): number {
+  return limit > 0 ? Math.max(0, limit - used) : 0
+}
+
+/** The refresh button's tooltip, one line: what a press does, and where auto-refresh stands. */
+export function describeRefresh(cache: CacheInfo, now: number, limit: number, used: number, isWorking: boolean): string {
+  if (limit <= 0) return 'Refresh cache now · auto-refresh off'
+  const left = refreshesLeft(limit, used)
+  if (left === 0) return `Refresh cache now · auto-refresh: 0 of ${limit} left until your next prompt`
+  const ttl = cache.ttl ?? '5m'
+  const nextAt = cache.touchedAt + TTL_MS[ttl] - REFRESH_LEAD_MS[ttl]
+  const when = isWorking ? 'next once idle' : nextAt > now ? `next in ${ago(nextAt - now)}` : 'next now'
+  return `Refresh cache now · auto-refresh: ${left} of ${limit} left, ${when}`
 }
 
 type TranscriptRow = {

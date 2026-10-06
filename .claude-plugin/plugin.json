@@ -1,11 +1,28 @@
 {
   "name": "context-band",
-  "version": "0.1.0",
-  "description": "A full-width row of /context-style squares above the prompt showing context-window use by category, with a prompt-cache countdown on the right.",
-  "author": { "name": "Derek Li", "url": "https://github.com/derek1ee" },
+  "version": "0.2.0",
+  "description": "Context-window squares by category above the prompt, with a prompt-cache countdown and an optional keep-warm refresh. Reads the context breakdown, the prompt draft's length and the session transcript's cache usage, all locally; a refresh (manual, or auto-refresh if enabled) sends one model request through Claude Code.",
+  "author": {
+    "name": "Derek Li",
+    "url": "https://github.com/derek1ee"
+  },
   "homepage": "https://github.com/derek1ee/claude-context-band",
   "repository": "https://github.com/derek1ee/claude-context-band",
   "license": "MIT",
-  "keywords": ["context", "context-window", "prompt-cache", "status", "tokens"],
+  "keywords": [
+    "context",
+    "context-window",
+    "prompt-cache",
+    "status",
+    "tokens"
+  ],
+  "userConfig": {
+    "autoRefresh": {
+      "type": "number",
+      "title": "Cache auto-refresh",
+      "description": "While the session is idle, keep the prompt cache warm by refreshing it just before it expires, up to this many times; the count starts over when you send a prompt. Each refresh is one cache read of the context, billed as usage. 0 turns it off. Also set with /context-band auto-refresh <n>.",
+      "default": 0
+    }
+  },
   "types": "./types/index.d.ts"
 }
