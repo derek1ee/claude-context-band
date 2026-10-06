@@ -1,0 +1,17 @@
+{
+  "name": "claude-context-band",
+  "owner": {
+    "name": "Derek Li",
+    "url": "https://github.com/derek1ee"
+  },
+  "metadata": {
+    "description": "context-band: a Claude Code mod drawing context-window use and a prompt-cache countdown above the prompt."
+  },
+  "plugins": [
+    {
+      "name": "context-band",
+      "source": "./",
+      "description": "Context-window squares by category above the prompt, with a prompt-cache countdown."
+    }
+  ]
+}

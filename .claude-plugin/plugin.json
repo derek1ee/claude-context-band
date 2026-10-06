@@ -1,6 +1,11 @@
 {
   "name": "context-band",
   "version": "0.1.0",
-  "description": "A full-width row of squares above the prompt showing context-window use by category, with a prompt-cache countdown on the right.",
+  "description": "A full-width row of /context-style squares above the prompt showing context-window use by category, with a prompt-cache countdown on the right.",
+  "author": { "name": "Derek Li", "url": "https://github.com/derek1ee" },
+  "homepage": "https://github.com/derek1ee/claude-context-band",
+  "repository": "https://github.com/derek1ee/claude-context-band",
+  "license": "MIT",
+  "keywords": ["context", "context-window", "prompt-cache", "status", "tokens"],
   "types": "./types/index.d.ts"
 }

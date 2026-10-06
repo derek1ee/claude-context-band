@@ -1,10 +1,24 @@
 # context-band
 
-A Claude Code mod: one full-width row of squares above the prompt showing context-window use by category, plus a prompt-cache countdown on the right.
+A Claude Code plugin that draws one full-width row of squares above the prompt, showing context-window use by category, plus a prompt-cache countdown on the right.
 
 ```
 ⛁ ⛁ ⛁ ⛁ ⛁ ⛀ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝   cache 1h 52:13
 ```
+
+## Install
+
+At a Claude Code terminal prompt:
+
+```
+/plugin install context-band --marketplace derek1ee/claude-context-band
+```
+
+Answer `y` to add the marketplace, then pick a scope (user scope loads it in every session). The band appears above the prompt right away, with no restart.
+
+**Requirements:** a Claude Code build with the function-hooks API; built and tested on 2.1.290. That API is early access and may change between releases, so another version may not load it or a future update may break it. Please open an issue if it does.
+
+## What it shows
 
 Squares, glyphs and colours follow `/context` exactly, with as many squares as fit the width:
 
@@ -21,14 +35,25 @@ Squares, glyphs and colours follow `/context` exactly, with as many squares as f
 - **TTL** comes from the transcript: each response's `usage.cache_creation` splits written tokens into `ephemeral_1h_input_tokens` and `ephemeral_5m_input_tokens`. Until a response has written to the cache, the label is hidden rather than guessed.
 - Green `cache 1h 52:13` while warm, yellow in the last 20%, then red `cache expired 36m ago` (rough: `<1m`, minutes, hours, days).
 
-## Surfaces
+## Surfaces and platforms
 
-The band shows on the terminal CLI and the desktop app's Code tab. VS Code and mobile don't draw the above-prompt band.
+- The band shows on the terminal CLI and the desktop app's Code tab. VS Code and mobile don't draw the above-prompt band.
+- Hover tooltips need a surface that reports the mouse: the fullscreen terminal or the desktop app. Elsewhere, run `/context-band`.
+- On macOS and Linux the transcript's tail is read with `tail`. On Windows the whole transcript is read instead, which works up to 4 MiB; past that the TTL can't be read and the cache label stays hidden.
+
+## Privacy
+
+Everything stays on your machine. The plugin reads Claude Code's own context breakdown (local estimates, no extra API calls) and the tail of the current session's transcript under `~/.claude/projects/` to learn the cache TTL. It sends nothing anywhere and makes no network requests.
 
 ## Develop
 
 ```sh
-claude --plugin-dir /path/to/context-band
-claude plugin validate .
-claude plugin test .
+git clone https://github.com/derek1ee/claude-context-band
+claude --plugin-dir ./claude-context-band   # load from the working copy
+claude plugin validate ./claude-context-band
+claude plugin test ./claude-context-band
 ```
+
+## License
+
+MIT
