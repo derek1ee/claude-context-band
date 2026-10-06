@@ -1,6 +1,6 @@
 {
   "name": "context-band",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Context-window squares by category above the prompt, with a prompt-cache countdown and an optional keep-warm refresh. Reads the context breakdown, the prompt draft's length and the session transcript's cache usage, all locally; a refresh (manual, or auto-refresh if enabled) sends one model request through Claude Code.",
   "author": {
     "name": "Derek Li",

@@ -2,19 +2,23 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { CacheInfo, CacheTtl, CtxRow } from '../types'
+import type { TurnPhase } from './layout'
 import {
   LABEL_WIDTH,
   RESERVE,
   TTL_MS,
+  addedLine,
+  addedSince,
   cacheLabel,
   configuredTtl,
+  describeAdded,
   describeCache,
   describeRefresh,
-  describeRun,
   estimateTokens,
   SESSION_LIMIT_KEEP_MS,
   SESSION_LIMIT_PREFIX,
   formatTokens,
+  isNewGlyph,
   layout,
   legendText,
   parseAutoRefresh,
@@ -33,6 +37,7 @@ const draft = atom({ plugin: 'context-band', key: 'draft' } as const, 0)
 const refreshes = atom({ plugin: 'context-band', key: 'refreshes' } as const, 0)
 const isRefreshing = atom({ plugin: 'context-band', key: 'isRefreshing' } as const, false)
 const sessionLimit = atom({ plugin: 'context-band', key: 'sessionLimit' } as const, null)
+const baseline = atom({ plugin: 'context-band', key: 'baseline' } as const, null)
 
 /** Enough of the transcript's end to hold the last few responses. */
 const TAIL_BYTES = 1024 * 1024
@@ -291,6 +296,17 @@ async function autoRefreshCommand($: EngineInterface, words: readonly string[]):
   }
 }
 
+/**
+ * Keeps each category's tokens as a turn begins: what the band compares
+ * against to draw that turn's growth solid, while it runs and until the next.
+ */
+async function snapshotBaseline($: EngineInterface): Promise<void> {
+  const c = await read($, ctx)
+  const snapshot: Record<string, number> = {}
+  for (const row of c?.rows ?? []) if (row.kind === 'used') snapshot[row.name] = row.tokens
+  await update($, baseline, () => (c === null ? null : snapshot))
+}
+
 /** Writes the draft's estimate only when it moves, so most keystrokes redraw nothing. */
 async function setDraft($: EngineInterface, text: string): Promise<void> {
   const tokens = estimateTokens(text)
@@ -349,11 +365,14 @@ export const register: Register = (on, options) => {
       info === null || info.ttl === null
         ? describeCache(info, t)
         : `Prompt cache: ${describeCache(info, t)}\nRefresh: ${await describeRefreshNow($, info, t, isWorking)}`
-    return { text: `${legendText(c, lastSquares, await read($, draft))}\n\n${cacheLine}` }
+    const base = await read($, baseline)
+    const turnLine = base === null ? '' : `\n${addedLine(addedSince(c, base), isWorking ? 'this' : 'last')}`
+    return { text: `${legendText(c, lastSquares, await read($, draft))}${turnLine}\n\n${cacheLine}` }
   })
 
   on('turn.start', async ($, e, next) => {
     isWorking = true
+    await snapshotBaseline($)
     return next(e)
   })
 
@@ -366,6 +385,7 @@ export const register: Register = (on, options) => {
     if (e.transcript_path !== '') transcriptPath = e.transcript_path
     void (async () => {
       if (e.source === 'clear') await update($, cache, () => null)
+      if (e.source === 'clear' || e.source === 'resume') await update($, baseline, () => null)
       // /clear keeps this window's own count under the new id; /resume takes up the resumed one's
       if (e.source === 'clear') await saveSessionLimit($, await read($, sessionLimit), e.session_id)
       if (e.source === 'resume') await loadSessionLimit($, e.session_id)
@@ -377,6 +397,7 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear') await update($, cache, () => null)
+    if (e.reason === 'clear') await update($, baseline, () => null)
     return next(e)
   })
 
@@ -434,6 +455,8 @@ export const register: Register = (on, options) => {
     const info = await read($, cache)
     const t = await read($, now)
     const typed = await read($, draft)
+    const grown = addedSince(c, await read($, baseline))
+    const phase: TurnPhase = e.props.isWorking ? 'this' : 'last'
     const used = await read($, refreshes)
     const { limit: autoNow, isSession } = await limitNow($)
     const refreshing = await read($, isRefreshing)
@@ -442,14 +465,14 @@ export const register: Register = (on, options) => {
     const columns = e.props.bodyColumns
     const n = squaresFor(columns - RESERVE)
     lastSquares = n
-    const runs = layout(c, n, typed)
+    const runs = layout(c, n, typed, grown)
     const label = cacheLabel(info, t)
 
-    // One entry per square: the run it belongs to and its tooltip.
-    const squares = runs.flatMap(run => {
-      const text = ` ${describeRun(run, c.window)} `
-      return run.glyphs.map(glyph => ({ run, glyph, text }))
-    })
+    // One entry per square: the run it belongs to and its tooltip. A square the
+    // turn added says so first, and names the solid glyph so it can be learned.
+    const squares = runs.flatMap(run =>
+      run.glyphs.map(glyph => ({ run, glyph, text: ` ${describeAdded(run, c.window, phase, isNewGlyph(glyph))} ` })),
+    )
     // The label and the refresh button show while the TTL is known; the
     // button only while there is a warm entry to keep alive.
     const isWarm = info !== null && info.ttl !== null && info.touchedAt + TTL_MS[info.ttl] > t

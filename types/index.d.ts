@@ -37,6 +37,8 @@ declare module 'claude-code' {
       isRefreshing: boolean
       /** This session's auto-refresh count, over the default; null follows the default. */
       sessionLimit: number | null
+      /** Each category's tokens when the current or last turn began, by name; null before any turn. */
+      baseline: Record<string, number> | null
     }
   }
 }

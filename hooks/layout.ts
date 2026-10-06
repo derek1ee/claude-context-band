@@ -7,8 +7,29 @@ export type SquareKind = CtxRow['kind'] | 'pending'
  * /context's own glyphs: a full square, a category's last square when under
  * 70% full, free space (drawn dim), the compaction buffer. The draft borrows
  * the free square, drawn in the messages colour: room about to be taken.
+ * Squares the current or last turn added are the solid forms of the same two.
  */
-export const GLYPH = { full: '⛁', partial: '⛀', free: '⛶', buffer: '⛝' } as const
+export const GLYPH = { full: '⛁', partial: '⛀', newFull: '⛃', newPartial: '⛂', free: '⛶', buffer: '⛝' } as const
+
+/** Whether a square is one the current or last turn added (drawn solid). */
+export function isNewGlyph(glyph: string): boolean {
+  return glyph === GLYPH.newFull || glyph === GLYPH.newPartial
+}
+
+/** Growth under this many tokens is estimate noise, not a turn's work: no square is marked for it. */
+export const ADDED_MIN_TOKENS = 100
+
+/** Each category's growth since `baseline` (a turn's start), by name; categories that shrank or held are left out. */
+export function addedSince(ctx: Ctx, baseline: Readonly<Record<string, number>> | null): Record<string, number> {
+  const added: Record<string, number> = {}
+  if (baseline === null) return added
+  for (const row of ctx.rows) {
+    if (row.kind !== 'used') continue
+    const growth = row.tokens - (baseline[row.name] ?? 0)
+    if (growth >= ADDED_MIN_TOKENS) added[row.name] = growth
+  }
+  return added
+}
 
 export const KIND_GLYPH: Record<SquareKind, string> = {
   used: GLYPH.full,
@@ -31,6 +52,8 @@ export type Run = {
   name: string
   color: string
   tokens: number
+  /** Tokens the current or last turn added to this category; 0 when none. */
+  added: number
   count: number
   /** Each square's glyph, in order. */
   glyphs: string[]
@@ -72,8 +95,12 @@ export function squaresFor(columns: number): number {
  * `draft` tokens (typed, not yet sent) take the squares right after the used
  * ones, at least one while anything is typed, in the colour of the last used
  * category, which in /context's order is the messages.
+ *
+ * `added` (a category's growth this turn or last, by name) turns the last of
+ * that category's squares solid: round(growth / square) of them, at least one,
+ * since growth lands at the end of what the category holds.
  */
-export function layout(ctx: Ctx, n: number, draft = 0): Run[] {
+export function layout(ctx: Ctx, n: number, draft = 0, added: Readonly<Record<string, number>> = {}): Run[] {
   const share = (tokens: number) => (tokens / ctx.window) * n
   const used = ctx.rows.filter(r => r.kind === 'used')
   const free = ctx.rows.find(r => r.kind === 'free')
@@ -82,7 +109,7 @@ export function layout(ctx: Ctx, n: number, draft = 0): Run[] {
 
   const runs: Run[] = []
   let drawn = 0
-  const push = (kind: SquareKind, name: string, color: string, tokens: number, glyph: string) => {
+  const push = (kind: SquareKind, name: string, color: string, tokens: number, glyph: string, grew = 0) => {
     drawn += 1
     const last = runs.at(-1)
     if (last !== undefined && last.kind === kind && last.name === name) {
@@ -90,7 +117,7 @@ export function layout(ctx: Ctx, n: number, draft = 0): Run[] {
       last.glyphs.push(glyph)
       last.text += `${glyph} `
     } else {
-      runs.push({ kind, name, color, tokens, count: 1, glyphs: [glyph], text: `${glyph} ` })
+      runs.push({ kind, name, color, tokens, added: grew, count: 1, glyphs: [glyph], text: `${glyph} ` })
     }
   }
 
@@ -98,9 +125,12 @@ export function layout(ctx: Ctx, n: number, draft = 0): Run[] {
     const exact = share(row.tokens)
     const whole = Math.floor(exact)
     const count = Math.max(1, Math.round(exact))
+    const grew = added[row.name] ?? 0
+    const newFrom = grew > 0 ? count - Math.min(count, Math.max(1, Math.round(share(grew)))) : count
     for (let i = 0; i < count && drawn < n; i++) {
-      const fullness = i === whole && exact > whole ? exact - whole : 1
-      push('used', row.name, row.color, row.tokens, fullness >= 0.7 ? GLYPH.full : GLYPH.partial)
+      const isFull = (i === whole && exact > whole ? exact - whole : 1) >= 0.7
+      const glyph = i >= newFrom ? (isFull ? GLYPH.newFull : GLYPH.newPartial) : isFull ? GLYPH.full : GLYPH.partial
+      push('used', row.name, row.color, row.tokens, glyph, grew)
     }
   }
 
@@ -147,6 +177,29 @@ export function describeRun(run: Run, window: number): string {
     run.kind === 'pending' ? `${run.name} (typed, not sent)` : run.kind === 'buffer' ? `${run.name} (kept for /compact)` : run.name
   const tokens = `${run.kind === 'pending' ? '~' : ''}${formatTokens(run.tokens)} tokens`
   return `${name} · ${tokens} · ${percent(run.tokens, window)} of ${formatTokens(window)}`
+}
+
+/** Which turn the solid squares are: the one running, or the one before the prompt being typed. */
+export type TurnPhase = 'this' | 'last'
+
+/**
+ * The tooltip of a run's solid squares: what the turn added, the glyph it is
+ * drawn with, then the category as a whole. Its other squares say the growth
+ * at the end of the usual line.
+ */
+export function describeAdded(run: Run, window: number, phase: TurnPhase, isNewSquare: boolean): string {
+  const base = describeRun(run, window)
+  if (run.added <= 0) return base
+  const growth = `+${formatTokens(run.added)}`
+  if (!isNewSquare) return `${base} · ${growth} ${phase} turn (${GLYPH.newFull})`
+  return `${GLYPH.newFull} added ${phase} turn: ${run.name} ${growth} · now ${formatTokens(run.tokens)} tokens, ${percent(run.tokens, window)} of ${formatTokens(window)}`
+}
+
+/** The legend's line for a turn's growth: `Last turn: Messages +6.2k · MCP tools +1.4k`. */
+export function addedLine(added: Readonly<Record<string, number>>, phase: TurnPhase): string {
+  const parts = Object.entries(added).map(([name, tokens]) => `${name} +${formatTokens(tokens)}`)
+  const label = phase === 'this' ? 'This turn' : 'Last turn'
+  return parts.length === 0 ? `${label}: no growth` : `${label} (${GLYPH.newFull}): ${parts.join(' · ')}`
 }
 
 /** Plain words for the theme keys /context paints its categories in. */
