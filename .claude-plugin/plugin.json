@@ -1,0 +1,6 @@
+{
+  "name": "context-band",
+  "version": "0.1.0",
+  "description": "A full-width row of squares above the prompt showing context-window use by category, with a prompt-cache countdown on the right.",
+  "types": "./types/index.d.ts"
+}
