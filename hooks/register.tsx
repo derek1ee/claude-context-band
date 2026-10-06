@@ -39,6 +39,14 @@ const KEEP_WARM_PROMPT = 'This is an automatic prompt-cache keep-alive, not a re
 /** At least this long between auto-refresh attempts, so a failing one cannot spend the count at once. */
 const AUTO_RETRY_MS = 15_000
 
+/**
+ * While the TTL is unknown after a request, the transcript is read again this
+ * often, for up to TTL_POLL_FOR_MS: Claude Code saves a response's row a moment
+ * after the response, so a read when it lands can come too early.
+ */
+const TTL_POLL_MS = 2000
+const TTL_POLL_FOR_MS = 60_000
+
 let transcriptPath: string | undefined
 let isMeasuring = false
 let isMeasureDirty = false
@@ -49,6 +57,7 @@ let settingsTtl: CacheTtl | null = null
 /** The `autoRefresh` option: how many keep-alive refreshes an idle stretch may spend. */
 let autoLimit = 0
 let lastAutoAttempt = 0
+let lastTtlPoll = 0
 let isWorking = false
 
 /** Re-reads /context's breakdown (local estimates, no API calls) into `ctx`; a failed read keeps the last. */
@@ -230,6 +239,10 @@ export const register: Register = (on, options) => {
         if (c === null) return
         const t = await $.clock.now()
         if (cacheLabel(c, t).text !== cacheLabel(c, await read($, now)).text) await update($, now, () => t)
+        if (c.ttl === null && t - c.touchedAt < TTL_POLL_FOR_MS && t - lastTtlPoll >= TTL_POLL_MS) {
+          lastTtlPoll = t
+          void readTranscript($)
+        }
         if (isWorking || t - lastAutoAttempt < AUTO_RETRY_MS) return
         if (!shouldAutoRefresh(c, t, autoLimit, await read($, refreshes))) return
         lastAutoAttempt = t
@@ -260,7 +273,7 @@ export const register: Register = (on, options) => {
     const t = await $.clock.now()
     const cacheLine =
       info === null || info.ttl === null
-        ? 'Prompt cache: TTL not seen yet'
+        ? describeCache(info, t)
         : `Prompt cache: ${describeCache(info, t)}\nRefresh: ${describeRefresh(info, t, autoLimit, await read($, refreshes), isWorking)}`
     return { text: `${legendText(c, lastSquares, await read($, draft))}\n\n${cacheLine}` }
   })
@@ -362,7 +375,7 @@ export const register: Register = (on, options) => {
     // The label and the refresh button show while the TTL is known; the
     // button only while there is a warm entry to keep alive.
     const isWarm = info !== null && info.ttl !== null && info.touchedAt + TTL_MS[info.ttl] > t
-    const cacheTip = info !== null && label.text !== '' ? ` ${describeCache(info, t)} ` : undefined
+    const cacheTip = ` ${describeCache(info, t)} `
     const refreshTip = info !== null && isWarm ? ` ${describeRefresh(info, t, autoLimit, used, e.props.isWorking)} ` : undefined
 
     // Tooltips reach no further right than the last square's glyph.

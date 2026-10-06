@@ -108,9 +108,9 @@ describe('cache', () => {
 
   test('the label counts down and turns over', () => {
     const at = 1_000_000
-    // nothing until the transcript says which TTL
-    expect(cacheLabel(null, at).text).toBe('')
-    expect(cacheLabel({ touchedAt: at, ttl: null }, at + 61_000).text).toBe('')
+    // before the first request it says so; until the TTL is known it waits rather than guess
+    expect(cacheLabel(null, at).text).toBe('no cache yet')
+    expect(cacheLabel({ touchedAt: at, ttl: null }, at + 61_000).text).toBe('cache …')
 
     expect(cacheLabel({ touchedAt: at, ttl: '1h' }, at)).toMatchObject({ text: 'cache 1h 60:00', color: 'success' })
     expect(cacheLabel({ touchedAt: at, ttl: '5m' }, at + 250_000)).toMatchObject({ text: 'cache 5m 0:50', color: 'warning' })
@@ -200,8 +200,8 @@ test('the band draws on the terminal and the desktop, a draft shows, the cache c
     const ui = await $.ui.mount({ ...BAND, surface })
     // 103 columns less the 23 kept for the label: 40 squares of 5k tokens each
     expect(await squaresOf(ui)).toBe('⛁'.repeat(12) + '⛶'.repeat(21) + '⛝'.repeat(7))
-    // no label until the transcript shows the TTL
-    expect(await ui.find({ type: 'Text', text: /cache/ })).toBeUndefined()
+    // no request yet: the label says so, not an empty space
+    expect(await ui.find({ type: 'Text', text: 'no cache yet' })).toBeDefined()
     // one tooltip per square, on the band's own row: what it is, its share, how big a square is
     const systemTips = await ui.findAll({ type: 'Text', text: ' System prompt · 20k tokens · 10% of 200k ' })
     expect(systemTips).toHaveLength(4)
@@ -257,4 +257,5 @@ test('the band draws on the terminal and the desktop, a draft shows, the cache c
   expect(legend.text).toContain('⛁ System prompt (light grey): 20k, 10%')
   expect(legend.text).toContain('⛁ Messages (orange): 40k, 20%')
   expect(legend.text).toContain('Prompt cache: 5m TTL · last request')
+  expect(legend.text).toContain('Refresh: Refresh cache now · auto-refresh off')
 })

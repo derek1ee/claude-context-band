@@ -193,12 +193,14 @@ export const FLASH_MS = 5 * 60_000
 
 /**
  * The right-hand label: the time left while warm, how long ago it lapsed once
- * expired. Empty until the TTL is known (a response in the transcript, or the
- * settings), so it never counts down against a guess. A 1h entry flashes,
- * reversing each second, through its last five minutes.
+ * expired. Before the first request it says so, and while the TTL is not yet
+ * known (a response in the transcript, or the settings, tell it) it waits
+ * rather than count down against a guess. A 1h entry flashes, reversing each
+ * second, through its last five minutes.
  */
 export function cacheLabel(cache: CacheInfo | null, now: number): { text: string; color: string; inverse: boolean } {
-  if (cache === null || cache.ttl === null) return { text: '', color: 'inactive', inverse: false }
+  if (cache === null) return { text: 'no cache yet', color: 'inactive', inverse: false }
+  if (cache.ttl === null) return { text: 'cache …', color: 'inactive', inverse: false }
 
   const expiry = cache.touchedAt + TTL_MS[cache.ttl]
   const remaining = expiry - Math.max(now, cache.touchedAt)
@@ -247,10 +249,11 @@ function timeOfDay(ms: number): string {
 }
 
 /** The cache label's tooltip, one line: the TTL, and the times the countdown runs between. */
-export function describeCache(cache: CacheInfo, now: number): string {
-  const ttl = cache.ttl ?? '5m'
-  const expiry = cache.touchedAt + TTL_MS[ttl]
-  return `${ttl} TTL · last request ${timeOfDay(cache.touchedAt)} · ${expiry > now ? 'expires' : 'expired'} ${timeOfDay(expiry)}`
+export function describeCache(cache: CacheInfo | null, now: number): string {
+  if (cache === null) return 'Prompt cache: the countdown starts with your first prompt'
+  if (cache.ttl === null) return `Prompt cache: last request ${timeOfDay(cache.touchedAt)} · TTL shows once the response is saved`
+  const expiry = cache.touchedAt + TTL_MS[cache.ttl]
+  return `${cache.ttl} TTL · last request ${timeOfDay(cache.touchedAt)} · ${expiry > now ? 'expires' : 'expired'} ${timeOfDay(expiry)}`
 }
 
 /** Auto-refreshes left in this idle stretch: 0 when off or spent. The button shows it as `↻ (n)`. */

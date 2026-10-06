@@ -79,12 +79,12 @@ const BAND = {
 const T0 = Date.parse('2026-10-06T00:00:00.000Z')
 
 /** The engine beneath the plugin: a TTL pinned in settings, and forks that read 150k from the cache. */
-function engine(on: On, ttl: '5m' | '1h') {
+function engine(on: On, ttl: '5m' | '1h' | null) {
   const state = { forks: 0, toasts: [] as string[], configSet: [] as { key: string; value: unknown }[] }
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000, breakdown: BREAKDOWN }, rateLimits: [] } }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('settings.read', () => ({ value: { promptCacheTtl: ttl } }))
+  on('settings.read', () => ({ value: ttl === null ? {} : { promptCacheTtl: ttl } }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
   on('turn.step', async function* ($, e) {
@@ -211,4 +211,34 @@ test('/context-band auto-refresh sets the one option', async ($, on) => {
   ])
   expect((await run('auto-refresh lots')).text).toMatch(/^Usage/)
   expect((await run('bogus')).text).toMatch(/^Usage/)
+})
+
+test('the TTL shows a moment after the first response, once Claude Code has saved it', async ($, on) => {
+  const clock = mock.clock(on, { now: T0 })
+  mock.env(on, {})
+  const world = engine(on, null) // automatic TTL: only a response tells
+  let tail = ''
+  on('process.run', () => ({ value: { exitCode: 0, stdout: tail, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('classic.SessionStart', () => ({}))
+
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  await $.classic.SessionStart({ source: 'startup', transcript_path: '/tmp/fresh.jsonl' })
+  const ui = await $.ui.mount(BAND)
+  expect(await ui.find({ type: 'Text', text: 'no cache yet' })).toBeDefined()
+
+  // the first request: the response's row is not saved yet
+  await request($, 't1')
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: 'cache …' })).toBeDefined()
+
+  // saved a moment later, with no further event: the next poll finds it
+  tail = JSON.stringify({
+    type: 'assistant',
+    timestamp: new Date(T0).toISOString(),
+    message: { model: 'claude-opus-5-5', usage: { cache_creation: { ephemeral_1h_input_tokens: 4000, ephemeral_5m_input_tokens: 0 } } },
+  })
+  await clock.advance(3000)
+  expect(await ui.find({ type: 'Text', text: 'cache 1h 59:57' })).toBeDefined()
+  expect(world.forks).toBe(0)
+  await ui.unmount()
 })
