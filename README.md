@@ -39,7 +39,7 @@ Squares, glyphs and colours follow `/context` exactly, with as many squares as f
 - `⛶` dim is free space, and `⛝` is the autocompact buffer at the right end.
 - `⛶` in the messages colour is what's typed in the prompt box but not sent yet (≈ 4 chars/token).
 - Hover any square (fullscreen or desktop) for a one-line tooltip on the band's own row, starting on the next square if it fits before the last square, else ending on the previous one, so it never covers the cache label. The band reads which square is under the pointer by column, so a tooltip never blocks the squares under it: sweep left or right and it follows square by square. It shows the category, tokens and % of the window category, tokens and % of the window (`Custom agents · 212 tokens · <0.1% of 1.0M`). A solid square says what the turn added (`⛃ added last turn: Messages +6.2k · now 81k tokens, 41% of 200k`), and the category's other squares end with `+6.2k last turn (⛃)`. Hover the cache label for the TTL and the last-request and expiry times, and the `↻ (n)` button for auto-refresh status.
-- `/context-band` prints the same legend in any terminal, with a `Last turn (⛃): Messages +6.2k · MCP tools +1.4k` line; `/context-band refresh` and `/context-band auto-refresh` are under Keeping the cache warm.
+- `/context-band` prints the same legend in any terminal, with a `Last turn (⛃): Messages +6.2k · MCP tools +1.4k` line; `/context-band refresh` and `/context-band auto-refresh` are under Keeping the cache warm, and `/context-band herdr` under Herdr.
 
 ## Cache countdown
 
@@ -71,6 +71,20 @@ While the session is idle, it refreshes just before expiry (2 minutes early for 
 
 Setting a session's count starts its allowance over. A session's own count lasts through `/clear` and plugin reloads, and comes back when you reopen that conversation with `--resume` or `--continue`. It's kept by session ID, so `--fork-session` starts from the default. Counts for conversations untouched for 30 days are dropped. The default is the "Cache auto-refresh" row in `/config`.
 
+## Herdr
+
+Inside [Herdr](https://herdr.dev), the session's entry in Herdr's agent list flashes along with the label through a 1h cache's last five minutes. On each beat its name reads `claude ⚠ 1h-cache 4:58`, and between beats it's back to Herdr's own. Entries the cache isn't about to expire for are left alone, and there's no Herdr setup to do.
+
+The band finds Herdr from the `HERDR_ENV` and `HERDR_PANE_ID` variables Herdr sets in each pane. Outside Herdr it does nothing. It renames the entry through the `herdr` command, and each name it sets expires within two seconds, so a name is never left behind if Claude Code quits mid-flash.
+
+```
+/context-band herdr            # where it stands, and this session's pane
+/context-band herdr preview    # flash the entry for 30 seconds, counting down from 5:00
+/context-band herdr off        # leave Herdr alone (on turns it back on)
+```
+
+`off` and `on` set the "Flash in Herdr's agent list" row in `/config`.
+
 ## Surfaces and platforms
 
 - The band shows on the terminal CLI and the desktop app's Code tab. VS Code and mobile don't draw the above-prompt band.
@@ -82,6 +96,8 @@ Setting a session's count starts its allowance over. A session's own count lasts
 The plugin reads Claude Code's own context breakdown (local estimates, no extra API calls), the length of what's typed in the prompt box (for the draft squares; the text itself isn't kept), and the tail of the current session's transcript under `~/.claude/projects/` (for each response's cache usage and time). It makes no network requests of its own and has no telemetry.
 
 The one exception is a cache refresh, whether you trigger it with `↻ (n)`, with `/context-band refresh`, or through auto-refresh if you turn that on. A refresh sends one model request through Claude Code's own client. That request re-sends your current conversation, just as Claude Code does on every turn.
+
+Inside Herdr, the band also runs the local `herdr` command. It reads the agent's name and sets or clears the entry's displayed name. That only happens while the entry is flashing, and nothing else is sent.
 
 ## Develop
 

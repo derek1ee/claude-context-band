@@ -3,6 +3,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { CacheInfo, CacheTtl, CtxRow } from '../types'
 import type { BandClientProps } from './band-client'
+import type { HerdrPane } from './herdr'
+import { PREVIEW_MS, agentName, clearNameArgv, flashName, herdrPane, previewCache, setNameArgv } from './herdr'
 import type { TurnPhase } from './layout'
 import {
   LABEL_WIDTH,
@@ -19,6 +21,7 @@ import {
   SESSION_LIMIT_KEEP_MS,
   SESSION_LIMIT_PREFIX,
   formatTokens,
+  isFlashing,
   isNewGlyph,
   layout,
   legendText,
@@ -69,6 +72,17 @@ let autoLimit = 0
 let lastAutoAttempt = 0
 let lastTtlPoll = 0
 let isWorking = false
+/** The `herdr` option: flash this session's entry in Herdr's agent list. */
+let isHerdrOn = true
+/** This session's Herdr pane, when it runs in one. */
+let herdrFound: HerdrPane | null = null
+/** When `/context-band herdr preview` began, while it runs. */
+let previewFrom: number | null = null
+/** The name Herdr shows for the pane from us, null while it shows its own. */
+let herdrShown: string | null = null
+/** The agent's own name in Herdr, read once as each flashing stretch begins. */
+let herdrBase: string | null = null
+let isHerdrSending = false
 
 /** Re-reads /context's breakdown (local estimates, no API calls) into `ctx`; a failed read keeps the last. */
 async function refreshContext($: EngineInterface): Promise<void> {
@@ -297,6 +311,81 @@ async function autoRefreshCommand($: EngineInterface, words: readonly string[]):
   }
 }
 
+/** Notes the Herdr pane this session runs in, from the variables Herdr sets in each pane. */
+async function findHerdr($: EngineInterface): Promise<void> {
+  try {
+    herdrFound = herdrPane({
+      HERDR_ENV: await $.env.get('HERDR_ENV'),
+      HERDR_PANE_ID: await $.env.get('HERDR_PANE_ID'),
+      HERDR_BIN_PATH: await $.env.get('HERDR_BIN_PATH'),
+    })
+  } catch {
+    herdrFound = null // no environment to read here
+  }
+}
+
+/** Brings Herdr's name for the pane to `want` (null: its own), one call at a time; a failed call is tried again next beat. */
+async function showHerdrName($: EngineInterface, h: HerdrPane, want: string | null): Promise<void> {
+  if (isHerdrSending || want === herdrShown) return
+  isHerdrSending = true
+  try {
+    const { exitCode } = await $.process.run(want === null ? clearNameArgv(h) : setNameArgv(h, want), { timeoutMs: 3000 })
+    if (exitCode === 0) herdrShown = want
+  } catch {
+    // no host commands here, or Herdr is gone; its TTL clears a name left set
+  } finally {
+    isHerdrSending = false
+  }
+}
+
+async function readHerdrBase($: EngineInterface, h: HerdrPane): Promise<string> {
+  try {
+    const { exitCode, stdout } = await $.process.run([h.bin, 'agent', 'get', h.pane], { timeoutMs: 3000 })
+    if (exitCode === 0) return agentName(stdout)
+  } catch {
+    // keep the default
+  }
+  return 'claude'
+}
+
+/**
+ * Called each second with the cache the band counts down: outside the flashing
+ * stretch it hands the name back to Herdr (a call only when ours is showing);
+ * inside, it shows the name and countdown on the label's flash beats.
+ */
+async function flashHerdr($: EngineInterface, h: HerdrPane, info: CacheInfo | null, t: number): Promise<void> {
+  if (!isFlashing(info, t)) {
+    herdrBase = null
+    return showHerdrName($, h, null)
+  }
+  herdrBase ??= await readHerdrBase($, h)
+  return showHerdrName($, h, flashName(herdrBase, info, t))
+}
+
+/** `/context-band herdr …`: nothing to show where it stands, `preview` to see it, `on` or `off`. */
+async function herdrCommand($: EngineInterface, words: readonly string[]): Promise<string> {
+  const [word = '', ...rest] = words
+  if (rest.length > 0 || !['', 'preview', 'on', 'off'].includes(word)) return 'Usage: /context-band herdr [preview | on | off]'
+  if (word === 'on' || word === 'off') {
+    const result = await $.config.set({ key: 'context-band.herdr', value: word === 'on' })
+    if (result.deny !== undefined) return `Herdr setting unchanged: ${result.deny}`
+    return word === 'on'
+      ? "Herdr: on. Inside Herdr, this session's entry in the agent list flashes through a 1h cache's last 5 minutes."
+      : "Herdr: off. The band leaves Herdr's agent list alone."
+  }
+  if (herdrFound === null) {
+    return "Herdr: this session isn't running inside Herdr, so there's nothing to flash. In a Herdr pane, the session's entry in Herdr's agent list flashes through a 1h cache's last 5 minutes."
+  }
+  if (!isHerdrOn) return "Herdr: off. /context-band herdr on flashes this session's entry in Herdr's agent list through a 1h cache's last 5 minutes."
+  if (word === 'preview') {
+    const t = await $.clock.now()
+    previewFrom = t
+    await flashHerdr($, herdrFound, previewCache(t), t)
+    return `Herdr preview: for ${PREVIEW_MS / 1000} seconds, this session's entry in Herdr's agent list flashes as it will through a 1h cache's last 5 minutes, counting down from 5:00.`
+  }
+  return `Herdr: on (pane ${herdrFound.pane}). This session's entry in Herdr's agent list flashes with the countdown through a 1h cache's last 5 minutes. /context-band herdr preview shows it for ${PREVIEW_MS / 1000} seconds; /context-band herdr off turns it off.`
+}
+
 /**
  * Keeps each category's tokens as a turn begins: what the band compares
  * against to draw that turn's growth solid, while it runs and until the next.
@@ -316,18 +405,26 @@ async function setDraft($: EngineInterface, text: string): Promise<void> {
 
 export const register: Register = (on, options) => {
   autoLimit = typeof options.autoRefresh === 'number' ? Math.max(0, Math.floor(options.autoRefresh)) : 0
+  isHerdrOn = options.herdr !== false
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
 
+    await findHerdr($)
+
     // Checks every second; redraws only when the label's text would change:
-    // each second while warm, each minute or hour once expired. While idle,
-    // an auto-refresh fires just before expiry, as many times as the option allows.
+    // each second while warm, each minute or hour once expired. Inside Herdr,
+    // the agent list's entry flashes in step with the label. While idle, an
+    // auto-refresh fires just before expiry, as many times as the option allows.
     $.clock.every(1000, () => {
       void (async () => {
         const c = await read($, cache)
-        if (c === null) return
         const t = await $.clock.now()
+        if (herdrFound !== null && isHerdrOn) {
+          if (previewFrom !== null && t - previewFrom >= PREVIEW_MS) previewFrom = null
+          void flashHerdr($, herdrFound, previewFrom === null ? c : previewCache(previewFrom), t)
+        }
+        if (c === null) return
         if (cacheLabel(c, t).text !== cacheLabel(c, await read($, now)).text) await update($, now, () => t)
         if (c.ttl === null && t - c.touchedAt < TTL_POLL_FOR_MS && t - lastTtlPoll >= TTL_POLL_MS) {
           lastTtlPoll = t
@@ -347,7 +444,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'context-band',
       description: "Explains the context band's squares, refreshes the prompt cache, or sets auto-refresh",
-      argumentHint: '[refresh | auto-refresh [<n> | reset | default <n>]]',
+      argumentHint: '[refresh | auto-refresh [<n> | reset | default <n>] | herdr [preview | on | off]]',
     })
     return started
   })
@@ -356,7 +453,8 @@ export const register: Register = (on, options) => {
     const [sub = '', ...words] = e.args.trim().split(/\s+/).filter(word => word !== '')
     if (sub === 'auto-refresh') return { text: await autoRefreshCommand($, words) }
     if (sub === 'refresh' && words.length === 0) return { text: await refreshCache($, false) }
-    if (sub !== '') return { text: 'Usage: /context-band [refresh | auto-refresh [<n> | reset | default <n>]]' }
+    if (sub === 'herdr') return { text: await herdrCommand($, words) }
+    if (sub !== '') return { text: 'Usage: /context-band [refresh | auto-refresh [<n> | reset | default <n>] | herdr [preview | on | off]]' }
 
     const c = await read($, ctx)
     if (c === null) return { text: 'Context band: no breakdown yet.' }
@@ -399,6 +497,7 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear') await update($, cache, () => null)
     if (e.reason === 'clear') await update($, baseline, () => null)
+    if (herdrFound !== null && herdrShown !== null) await showHerdrName($, herdrFound, null)
     return next(e)
   })
 

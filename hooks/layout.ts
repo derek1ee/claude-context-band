@@ -244,6 +244,13 @@ export function ago(ms: number): string {
 /** How long before a 1h entry expires the label starts flashing. 5m entries never flash. */
 export const FLASH_MS = 5 * 60_000
 
+/** Whether the cache is in its flashing stretch: a 1h entry, still warm, in its last five minutes. */
+export function isFlashing(cache: CacheInfo | null, now: number): boolean {
+  if (cache === null || cache.ttl !== '1h') return false
+  const remaining = cache.touchedAt + TTL_MS[cache.ttl] - Math.max(now, cache.touchedAt)
+  return remaining > 0 && remaining <= FLASH_MS
+}
+
 /**
  * The right-hand label: the time left while warm, how long ago it lapsed once
  * expired. Before the first request it says so, and while the TTL is not yet
@@ -261,8 +268,7 @@ export function cacheLabel(cache: CacheInfo | null, now: number): { text: string
   if (remaining <= 0) return { text: `cache expired ${ago(-remaining)} ago`, color: 'error', inverse: false }
 
   const color = remaining <= TTL_MS[cache.ttl] * 0.2 ? 'warning' : 'success'
-  const isFlashing = cache.ttl === '1h' && remaining <= FLASH_MS
-  return { text: `${cache.ttl}-cache ${clock(remaining)}`, color, inverse: isFlashing && Math.ceil(remaining / 1000) % 2 === 0 }
+  return { text: `${cache.ttl}-cache ${clock(remaining)}`, color, inverse: isFlashing(cache, now) && Math.ceil(remaining / 1000) % 2 === 0 }
 }
 
 /** How long before expiry an auto-refresh fires: room for the request to land. */

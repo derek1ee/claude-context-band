@@ -1,7 +1,7 @@
 {
   "name": "context-band",
-  "version": "0.4.1",
-  "description": "Context-window squares by category above the prompt, with a prompt-cache countdown and an optional keep-warm refresh. Reads the context breakdown, the prompt draft's length and the session transcript's cache usage, all locally; a refresh (manual, or auto-refresh if enabled) sends one model request through Claude Code.",
+  "version": "0.5.0",
+  "description": "Context-window squares by category above the prompt, with a prompt-cache countdown and an optional keep-warm refresh. Reads the context breakdown, the prompt draft's length and the session transcript's cache usage, all locally; a refresh (manual, or auto-refresh if enabled) sends one model request through Claude Code. Inside Herdr, it also flashes the session's entry in Herdr's agent list as the cache nears expiry, through the local herdr command.",
   "author": {
     "name": "Derek Li",
     "url": "https://github.com/derek1ee"
@@ -22,6 +22,12 @@
       "title": "Cache auto-refresh",
       "description": "The default for every session: while idle, keep the prompt cache warm by refreshing it just before it expires, up to this many times; the count starts over when you send a prompt. Each refresh is one cache read of the context, billed as usage. 0 turns it off. /context-band auto-refresh default <n> sets this too; /context-band auto-refresh <n> overrides it for one session.",
       "default": 0
+    },
+    "herdr": {
+      "type": "boolean",
+      "title": "Flash in Herdr's agent list",
+      "description": "Inside Herdr (herdr.dev), flash this session's entry in Herdr's agent list with the countdown through a 1h cache's last 5 minutes, by renaming the entry for each beat through the herdr command. Does nothing outside Herdr. /context-band herdr on|off sets this too.",
+      "default": true
     }
   },
   "types": "./types/index.d.ts"
