@@ -386,20 +386,30 @@ type TranscriptRow = {
   message?: {
     model?: string
     usage?: {
+      input_tokens?: number
+      output_tokens?: number
+      cache_read_input_tokens?: number
+      cache_creation_input_tokens?: number
       cache_creation?: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number } | null
     }
   }
 }
 
+/** What a transcript's tail tells: the TTL its cache writes went to, when its newest response landed, and how big that context was. */
+export type TailInfo = { ttl: CacheTtl | null; at: number | null; tokens: number | null }
+
 /**
- * Reads the tail of a session transcript (JSONL) from the end: the time of the
- * newest main-thread response, and the TTL the newest response that wrote to
+ * Reads the tail of a transcript (JSONL) from the end: the time and context
+ * size of the newest response, and the TTL the newest response that wrote to
  * the cache wrote with. Where one response wrote to both buckets the shorter
- * wins, since that is when the conversation's own prefix lapses.
+ * wins, since that is when the conversation's own prefix lapses. The main
+ * transcript's rows count with its subagents' left out; an agent's own
+ * transcript (`isAgent`) is all sidechain rows.
  */
-export function parseTail(text: string): { ttl: CacheTtl | null; at: number | null } {
+export function parseTail(text: string, isAgent = false): TailInfo {
   const lines = text.split('\n')
   let at: number | null = null
+  let tokens: number | null = null
 
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]
@@ -411,18 +421,38 @@ export function parseTail(text: string): { ttl: CacheTtl | null; at: number | nu
     } catch {
       continue // the first line of a tail is usually cut
     }
-    if (row.type !== 'assistant' || row.isSidechain === true || row.message?.model === '<synthetic>') continue
+    if (row.type !== 'assistant' || (row.isSidechain === true) !== isAgent || row.message?.model === '<synthetic>') continue
 
     if (at === null && row.timestamp !== undefined) {
       const parsed = Date.parse(row.timestamp)
       if (!Number.isNaN(parsed)) at = parsed
     }
+    const usage = row.message?.usage
+    if (tokens === null && usage !== undefined) {
+      tokens =
+        (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.output_tokens ?? 0)
+    }
 
-    const written = row.message?.usage?.cache_creation
+    const written = usage?.cache_creation
     if (written === undefined || written === null) continue
-    if ((written.ephemeral_5m_input_tokens ?? 0) > 0) return { ttl: '5m', at }
-    if ((written.ephemeral_1h_input_tokens ?? 0) > 0) return { ttl: '1h', at }
+    if ((written.ephemeral_5m_input_tokens ?? 0) > 0) return { ttl: '5m', at, tokens }
+    if ((written.ephemeral_1h_input_tokens ?? 0) > 0) return { ttl: '1h', at, tokens }
   }
 
-  return { ttl: null, at }
+  return { ttl: null, at, tokens }
+}
+
+/**
+ * The squares for an agent in view: its context as one run (an agent's
+ * breakdown by category is not to be had), in the main thread's messages
+ * colour, then free space, over the main thread's window.
+ */
+export function agentContext(main: Ctx, tokens: number | null): Ctx {
+  const messages = main.rows.find(row => row.name === 'Messages')
+  const free = main.rows.find(row => row.kind === 'free')
+  const used = Math.min(Math.max(0, tokens ?? 0), main.window)
+  const rows: CtxRow[] = []
+  if (used > 0) rows.push({ name: 'Agent context', color: messages?.color ?? 'text', tokens: used, kind: 'used' })
+  rows.push({ name: 'Free space', color: free?.color ?? 'inactive', tokens: main.window - used, kind: 'free' })
+  return { window: main.window, rows }
 }

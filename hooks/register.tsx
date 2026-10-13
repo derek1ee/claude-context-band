@@ -1,10 +1,25 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { CacheInfo, CacheTtl, CtxRow } from '../types'
+import type { AgentCache, CacheInfo, CacheTtl, CtxRow } from '../types'
 import type { BandClientProps } from './band-client'
-import type { HerdrPane } from './herdr'
-import { PREVIEW_MS, agentName, clearNameArgv, flashName, herdrPane, previewCache, setNameArgv } from './herdr'
+import type { HerdrPane, HerdrShow } from './herdr'
+import {
+  PREVIEW_MS,
+  SETUP_ROWS,
+  SETUP_TOKEN,
+  agentName,
+  clearArgv,
+  flashName,
+  herdrPane,
+  laysOutAgents,
+  previewCache,
+  setArgv,
+  showsToken,
+  tokenValue,
+  withSetup,
+  withoutSetup,
+} from './herdr'
 import type { TurnPhase } from './layout'
 import {
   LABEL_WIDTH,
@@ -12,6 +27,7 @@ import {
   TTL_MS,
   addedLine,
   addedSince,
+  agentContext,
   cacheLabel,
   configuredTtl,
   describeAdded,
@@ -42,6 +58,7 @@ const refreshes = atom({ plugin: 'context-band', key: 'refreshes' } as const, 0)
 const isRefreshing = atom({ plugin: 'context-band', key: 'isRefreshing' } as const, false)
 const sessionLimit = atom({ plugin: 'context-band', key: 'sessionLimit' } as const, null)
 const baseline = atom({ plugin: 'context-band', key: 'baseline' } as const, null)
+const agents = atom({ plugin: 'context-band', key: 'agents' } as const, {})
 
 /** Enough of the transcript's end to hold the last few responses. */
 const TAIL_BYTES = 1024 * 1024
@@ -71,17 +88,32 @@ let settingsTtl: CacheTtl | null = null
 let autoLimit = 0
 let lastAutoAttempt = 0
 let lastTtlPoll = 0
+/**
+ * When the newest main-thread request began, until the transcript shows its
+ * response: the TTL is read again until then, so a change (5m past the usage
+ * limits, 1h again after) shows within seconds, whatever the turn's end does.
+ */
+let ttlPendingSince: number | null = null
 let isWorking = false
+/** The agent whose transcript is in view above the band, as its last draw said; undefined for the main conversation. */
+let viewedAgent: string | undefined
+/** When each agent's transcript was last read, so a draw or a tick reads it at most every TTL_POLL_MS. */
+const agentReadAt = new Map<string, number>()
+/** The agents the band keeps a cache for, the most recently active first; past this the oldest is dropped. */
+const AGENTS_KEPT = 40
 /** The `herdr` option: flash this session's entry in Herdr's agent list. */
 let isHerdrOn = true
 /** This session's Herdr pane, when it runs in one. */
 let herdrFound: HerdrPane | null = null
 /** When `/context-band herdr preview` began, while it runs. */
 let previewFrom: number | null = null
-/** The name Herdr shows for the pane from us, null while it shows its own. */
-let herdrShown: string | null = null
-/** The agent's own name in Herdr, read once as each flashing stretch begins. */
-let herdrBase: string | null = null
+/** What Herdr shows for the pane from us, null while it shows its own. */
+let herdrShown: HerdrShow | null = null
+/**
+ * How the entry flashes, decided as each flashing stretch begins: the coloured
+ * token when Herdr's config shows it, else the agent's own name renamed.
+ */
+let herdrLook: { kind: 'token' } | { kind: 'name'; base: string } | null = null
 let isHerdrSending = false
 
 /** Re-reads /context's breakdown (local estimates, no API calls) into `ctx`; a failed read keeps the last. */
@@ -166,12 +198,48 @@ async function readTranscript($: EngineInterface): Promise<void> {
     const text = await transcriptTail($, transcriptPath)
     if (text === undefined) return
     const { ttl, at } = parseTail(text)
+    if (ttlPendingSince !== null && at !== null && at >= ttlPendingSince) ttlPendingSince = null
     await update($, cache, c => {
       if (c !== null) return { touchedAt: c.touchedAt, ttl: ttl ?? c.ttl }
       return at === null ? null : { touchedAt: at, ttl }
     })
   } catch {
     // no transcript to read here (a remote host, a test); the countdown runs on without it
+  }
+}
+
+/** Changes one agent's entry; past AGENTS_KEPT, the one least recently active goes. */
+async function setAgent($: EngineInterface, id: string, change: (a: AgentCache | undefined) => AgentCache): Promise<void> {
+  await update($, agents, all => {
+    const next: Record<string, AgentCache> = { ...all, [id]: change(all[id]) }
+    const ids = Object.keys(next)
+    if (ids.length > AGENTS_KEPT) {
+      const oldest = ids.filter(other => other !== id).sort((a, b) => (next[a]?.cache?.touchedAt ?? 0) - (next[b]?.cache?.touchedAt ?? 0))[0]
+      if (oldest !== undefined) delete next[oldest]
+    }
+    return next
+  })
+}
+
+/**
+ * Reads an agent's own transcript (beside the session's, under `subagents/`)
+ * for the TTL its requests write with, and, for an agent first seen here (one
+ * that began before a reload), when it last answered and how big its context is.
+ */
+async function readAgentTranscript($: EngineInterface, id: string): Promise<void> {
+  agentReadAt.set(id, await $.clock.now())
+  try {
+    if (transcriptPath === undefined || transcriptPath === '') transcriptPath = await findTranscript($)
+    if (transcriptPath === undefined) return
+    const text = await transcriptTail($, `${transcriptPath.replace(/\.jsonl$/, '')}/subagents/agent-${id}.jsonl`)
+    if (text === undefined) return
+    const { ttl, at, tokens } = parseTail(text, true)
+    await setAgent($, id, a => ({
+      cache: a?.cache ? { touchedAt: a.cache.touchedAt, ttl: ttl ?? a.cache.ttl } : at === null ? null : { touchedAt: at, ttl },
+      tokens: a?.tokens ?? tokens,
+    }))
+  } catch {
+    // no transcript for it (a workflow's agent, a fork): the band shows what its requests told
   }
 }
 
@@ -318,21 +386,27 @@ async function findHerdr($: EngineInterface): Promise<void> {
       HERDR_ENV: await $.env.get('HERDR_ENV'),
       HERDR_PANE_ID: await $.env.get('HERDR_PANE_ID'),
       HERDR_BIN_PATH: await $.env.get('HERDR_BIN_PATH'),
+      HERDR_CONFIG_PATH: await $.env.get('HERDR_CONFIG_PATH'),
+      HOME: await $.env.get('HOME'),
+      APPDATA: await $.env.get('APPDATA'),
     })
   } catch {
     herdrFound = null // no environment to read here
   }
 }
 
-/** Brings Herdr's name for the pane to `want` (null: its own), one call at a time; a failed call is tried again next beat. */
-async function showHerdrName($: EngineInterface, h: HerdrPane, want: string | null): Promise<void> {
-  if (isHerdrSending || want === herdrShown) return
+/** Brings what Herdr shows for the pane to `want` (null: its own), one call at a time; a failed call is tried again next beat. */
+async function showHerdr($: EngineInterface, h: HerdrPane, want: HerdrShow | null): Promise<void> {
+  const shown = herdrShown
+  const isSame = want !== null && shown !== null && want.kind === shown.kind && want.value === shown.value
+  const argv = want !== null ? setArgv(h, want) : shown !== null ? clearArgv(h, shown.kind) : null
+  if (isHerdrSending || isSame || argv === null) return
   isHerdrSending = true
   try {
-    const { exitCode } = await $.process.run(want === null ? clearNameArgv(h) : setNameArgv(h, want), { timeoutMs: 3000 })
+    const { exitCode } = await $.process.run(argv, { timeoutMs: 3000 })
     if (exitCode === 0) herdrShown = want
   } catch {
-    // no host commands here, or Herdr is gone; its TTL clears a name left set
+    // no host commands here, or Herdr is gone; its TTL clears what was left set
   } finally {
     isHerdrSending = false
   }
@@ -348,24 +422,116 @@ async function readHerdrBase($: EngineInterface, h: HerdrPane): Promise<string> 
   return 'claude'
 }
 
+/** Herdr's config as text: empty when there is no file yet, null when it can't be read. */
+async function readHerdrConfig($: EngineInterface, h: HerdrPane): Promise<string | null> {
+  if (h.config === null) return null
+  try {
+    const text = await $.fs.read(h.config)
+    return typeof text === 'string' ? text : null
+  } catch {
+    try {
+      return (await $.fs.exists(h.config)) ? null : ''
+    } catch {
+      return null
+    }
+  }
+}
+
+async function readHerdrLook($: EngineInterface, h: HerdrPane): Promise<NonNullable<typeof herdrLook>> {
+  const config = await readHerdrConfig($, h)
+  if (config !== null && showsToken(config)) return { kind: 'token' }
+  return { kind: 'name', base: await readHerdrBase($, h) }
+}
+
 /**
  * Called each second with the cache the band counts down: outside the flashing
- * stretch it hands the name back to Herdr (a call only when ours is showing);
- * inside, it shows the name and countdown on the label's flash beats.
+ * stretch it hands the entry back to Herdr (a call only when ours is showing);
+ * inside, it shows the coloured countdown, or the renamed entry on the beats.
  */
 async function flashHerdr($: EngineInterface, h: HerdrPane, info: CacheInfo | null, t: number): Promise<void> {
   if (!isFlashing(info, t)) {
-    herdrBase = null
-    return showHerdrName($, h, null)
+    herdrLook = null
+    return showHerdr($, h, null)
   }
-  herdrBase ??= await readHerdrBase($, h)
-  return showHerdrName($, h, flashName(herdrBase, info, t))
+  herdrLook ??= await readHerdrLook($, h)
+  const value = herdrLook.kind === 'token' ? tokenValue(info, t) : flashName(herdrLook.base, info, t)
+  return showHerdr($, h, value === null ? null : { kind: herdrLook.kind, value })
 }
 
-/** `/context-band herdr …`: nothing to show where it stands, `preview` to see it, `on` or `off`. */
+/**
+ * Saves Herdr's config as `after`, has Herdr check it, putting `before` back
+ * when Herdr rejects it, then has the running server reload it. Resolves
+ * Herdr's complaint when it rejected the file, else whether the reload took.
+ */
+async function saveHerdrConfig(
+  $: EngineInterface,
+  h: HerdrPane,
+  path: string,
+  before: string,
+  after: string,
+): Promise<{ rejected: string } | { isReloaded: boolean }> {
+  await $.fs.write(path, after)
+  const check = await $.process.run([h.bin, 'config', 'check'], { timeoutMs: 10_000 })
+  if (check.exitCode !== 0) {
+    await $.fs.write(path, before)
+    return { rejected: `${check.stdout}${check.stderr}`.trim() }
+  }
+  const reload = await $.process.run([h.bin, 'server', 'reload-config'], { timeoutMs: 10_000 })
+  return { isReloaded: reload.exitCode === 0 }
+}
+
+/**
+ * `/context-band herdr setup [remove]`: adds the coloured countdown to Herdr's
+ * config for Claude entries, or takes it out. A config that already lays out
+ * the agent list is left alone, with the lines to add by hand.
+ */
+async function herdrSetup($: EngineInterface, h: HerdrPane, isRemove: boolean): Promise<string> {
+  const path = h.config
+  if (path === null) return "Herdr setup: can't tell where Herdr's config is (neither HERDR_CONFIG_PATH nor HOME is set). Nothing changed."
+  const before = await readHerdrConfig($, h)
+  if (before === null) return `Herdr setup: couldn't read ${path}. Nothing changed.`
+  const reloadNote = (isReloaded: boolean) => (isReloaded ? ' and reloaded Herdr' : '; run herdr server reload-config to apply it')
+
+  try {
+    if (isRemove) {
+      const after = withoutSetup(before)
+      if (after === null) return `Herdr setup: ${path} has no context-band rows to remove.`
+      const saved = await saveHerdrConfig($, h, path, before, after)
+      if ('rejected' in saved) return `Herdr setup: Herdr rejected the change, so ${path} is back as it was.\n${saved.rejected}`
+      herdrLook = null
+      return `Took the countdown rows out of ${path}${reloadNote(saved.isReloaded)}. The entry goes back to flashing its name.`
+    }
+
+    if (showsToken(before)) return `Herdr setup: ${path} already shows $context_band, so the countdown flashes there in colour. /context-band herdr preview shows it.`
+    if (laysOutAgents(before)) {
+      return [
+        `Herdr setup: ${path} already lays out Herdr's agent list, so setup leaves it to you rather than replace your rows. Add the countdown to the row you want, after "agent" for example:`,
+        `  ${SETUP_TOKEN}`,
+        `Or, for Claude entries only, Herdr's default rows with it:`,
+        SETUP_ROWS,
+        'Then run: herdr server reload-config',
+      ].join('\n\n')
+    }
+
+    const backup = `${path}.context-band-backup`
+    if (before !== '') await $.fs.write(backup, before)
+    const saved = await saveHerdrConfig($, h, path, before, withSetup(before))
+    if ('rejected' in saved) return `Herdr setup: Herdr rejected the change, so ${path} is back as it was.\n${saved.rejected}`
+    herdrLook = null
+    const kept = before === '' ? '' : ` (the old file is at ${backup})`
+    return `Added the countdown rows for Claude entries to ${path}${kept}${reloadNote(saved.isReloaded)}. Through a 1h cache's last 5 minutes, the entry shows the countdown after its name, yellow, flashing red. /context-band herdr preview shows it; /context-band herdr setup remove takes it out.`
+  } catch (error) {
+    return `Herdr setup: couldn't change ${path} (${error instanceof Error ? error.message : String(error)}).`
+  }
+}
+
+const HERDR_USAGE = 'Usage: /context-band herdr [preview | setup [remove] | on | off]'
+
+/** `/context-band herdr …`: nothing to show where it stands, `preview` to see it, `setup` for colour, `on` or `off`. */
 async function herdrCommand($: EngineInterface, words: readonly string[]): Promise<string> {
   const [word = '', ...rest] = words
-  if (rest.length > 0 || !['', 'preview', 'on', 'off'].includes(word)) return 'Usage: /context-band herdr [preview | on | off]'
+  const isSetup = word === 'setup' && (rest.length === 0 || (rest.length === 1 && rest[0] === 'remove'))
+  if (!isSetup && (rest.length > 0 || !['', 'preview', 'on', 'off'].includes(word))) return HERDR_USAGE
   if (word === 'on' || word === 'off') {
     const result = await $.config.set({ key: 'context-band.herdr', value: word === 'on' })
     if (result.deny !== undefined) return `Herdr setting unchanged: ${result.deny}`
@@ -376,6 +542,7 @@ async function herdrCommand($: EngineInterface, words: readonly string[]): Promi
   if (herdrFound === null) {
     return "Herdr: this session isn't running inside Herdr, so there's nothing to flash. In a Herdr pane, the session's entry in Herdr's agent list flashes through a 1h cache's last 5 minutes."
   }
+  if (isSetup) return herdrSetup($, herdrFound, rest[0] === 'remove')
   if (!isHerdrOn) return "Herdr: off. /context-band herdr on flashes this session's entry in Herdr's agent list through a 1h cache's last 5 minutes."
   if (word === 'preview') {
     const t = await $.clock.now()
@@ -383,7 +550,12 @@ async function herdrCommand($: EngineInterface, words: readonly string[]): Promi
     await flashHerdr($, herdrFound, previewCache(t), t)
     return `Herdr preview: for ${PREVIEW_MS / 1000} seconds, this session's entry in Herdr's agent list flashes as it will through a 1h cache's last 5 minutes, counting down from 5:00.`
   }
-  return `Herdr: on (pane ${herdrFound.pane}). This session's entry in Herdr's agent list flashes with the countdown through a 1h cache's last 5 minutes. /context-band herdr preview shows it for ${PREVIEW_MS / 1000} seconds; /context-band herdr off turns it off.`
+  const config = await readHerdrConfig($, herdrFound)
+  const look =
+    config !== null && showsToken(config)
+      ? 'shows the countdown after its name, yellow, flashing red (your Herdr config shows $context_band)'
+      : 'flashes its name with the countdown; /context-band herdr setup adds a coloured countdown instead'
+  return `Herdr: on (pane ${herdrFound.pane}). Through a 1h cache's last 5 minutes, this session's entry in Herdr's agent list ${look}. /context-band herdr preview shows it for ${PREVIEW_MS / 1000} seconds; /context-band herdr off turns it off.`
 }
 
 /**
@@ -424,9 +596,18 @@ export const register: Register = (on, options) => {
           if (previewFrom !== null && t - previewFrom >= PREVIEW_MS) previewFrom = null
           void flashHerdr($, herdrFound, previewFrom === null ? c : previewCache(previewFrom), t)
         }
+        // the label redraws when its text would change: the main thread's, or the agent's in view
+        const seen = viewedAgent === undefined ? undefined : (await read($, agents))[viewedAgent]
+        const shown = await read($, now)
+        const isTicking = (info: CacheInfo | null | undefined) => info != null && cacheLabel(info, t).text !== cacheLabel(info, shown).text
+        if (isTicking(c) || isTicking(seen?.cache)) await update($, now, () => t)
+        if (viewedAgent !== undefined && (seen?.cache?.ttl ?? null) === null && t - (agentReadAt.get(viewedAgent) ?? 0) >= TTL_POLL_MS) {
+          void readAgentTranscript($, viewedAgent)
+        }
         if (c === null) return
-        if (cacheLabel(c, t).text !== cacheLabel(c, await read($, now)).text) await update($, now, () => t)
-        if (c.ttl === null && t - c.touchedAt < TTL_POLL_FOR_MS && t - lastTtlPoll >= TTL_POLL_MS) {
+        // a request's response tells its TTL once Claude Code has saved it: read until it shows, for up to a minute
+        const waitingSince = ttlPendingSince ?? (c.ttl === null ? c.touchedAt : null)
+        if (waitingSince !== null && t - waitingSince < TTL_POLL_FOR_MS && t - lastTtlPoll >= TTL_POLL_MS) {
           lastTtlPoll = t
           void readTranscript($)
         }
@@ -444,7 +625,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'context-band',
       description: "Explains the context band's squares, refreshes the prompt cache, or sets auto-refresh",
-      argumentHint: '[refresh | auto-refresh [<n> | reset | default <n>] | herdr [preview | on | off]]',
+      argumentHint: '[refresh | auto-refresh [<n> | reset | default <n>] | herdr [preview | setup [remove] | on | off]]',
     })
     return started
   })
@@ -454,7 +635,7 @@ export const register: Register = (on, options) => {
     if (sub === 'auto-refresh') return { text: await autoRefreshCommand($, words) }
     if (sub === 'refresh' && words.length === 0) return { text: await refreshCache($, false) }
     if (sub === 'herdr') return { text: await herdrCommand($, words) }
-    if (sub !== '') return { text: 'Usage: /context-band [refresh | auto-refresh [<n> | reset | default <n>] | herdr [preview | on | off]]' }
+    if (sub !== '') return { text: 'Usage: /context-band [refresh | auto-refresh [<n> | reset | default <n>] | herdr [preview | setup [remove] | on | off]]' }
 
     const c = await read($, ctx)
     if (c === null) return { text: 'Context band: no breakdown yet.' }
@@ -485,6 +666,7 @@ export const register: Register = (on, options) => {
     void (async () => {
       if (e.source === 'clear') await update($, cache, () => null)
       if (e.source === 'clear' || e.source === 'resume') await update($, baseline, () => null)
+      if (e.source === 'clear' || e.source === 'resume') await update($, agents, () => ({}))
       // /clear keeps this window's own count under the new id; /resume takes up the resumed one's
       if (e.source === 'clear') await saveSessionLimit($, await read($, sessionLimit), e.session_id)
       if (e.source === 'resume') await loadSessionLimit($, e.session_id)
@@ -497,7 +679,7 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear') await update($, cache, () => null)
     if (e.reason === 'clear') await update($, baseline, () => null)
-    if (herdrFound !== null && herdrShown !== null) await showHerdrName($, herdrFound, null)
+    if (herdrFound !== null && herdrShown !== null) await showHerdr($, herdrFound, null)
     return next(e)
   })
 
@@ -532,12 +714,26 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // Every main-loop request reads (and so re-arms) the cached prefix.
+  // Every request reads (and so re-arms) its loop's cached prefix: the main
+  // thread's, or an agent's own, which the band shows while that agent is in view.
   on('turn.step', async function* ($, e, next) {
-    if (e.agentId !== undefined) return yield* next(e)
-    await touch($)
+    const startedAt = await $.clock.now()
+    if (e.agentId !== undefined) {
+      const id = e.agentId
+      await setAgent($, id, a => ({ cache: { touchedAt: startedAt, ttl: a?.cache?.ttl ?? null }, tokens: a?.tokens ?? null }))
+      const result = yield* next(e)
+      const usage = result.usage
+      if (usage !== null) {
+        const tokens = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens + usage.output_tokens
+        await setAgent($, id, a => ({ cache: a?.cache ?? null, tokens }))
+      }
+      if (id === viewedAgent) void readAgentTranscript($, id)
+      return result
+    }
+    await touch($, startedAt)
+    ttlPendingSince = startedAt
     const result = yield* next(e)
-    if ((await read($, cache))?.ttl === null) void readTranscript($)
+    void readTranscript($)
     return result
   })
 
@@ -563,10 +759,17 @@ export const register: Register = (on, options) => {
     const c = await read($, ctx)
     if (c === null) return next(e)
 
-    const info = await read($, cache)
     const t = await read($, now)
+    // the transcript in view: the main conversation's, or one agent's, opened from the tasks list
+    const viewing = e.props.view.agentId
+    // the next tick reads an agent's transcript once it's in view
+    viewedAgent = viewing
+    const agent = viewing === undefined ? undefined : (await read($, agents))[viewing]
+    const isAgentUnread = viewing !== undefined && (agent?.cache ?? null) === null
+    const info = viewing === undefined ? await read($, cache) : (agent?.cache ?? null)
+    const shown = viewing === undefined ? c : agentContext(c, agent?.tokens ?? null)
     const typed = await read($, draft)
-    const grown = addedSince(c, await read($, baseline))
+    const grown = viewing === undefined ? addedSince(c, await read($, baseline)) : {}
     const phase: TurnPhase = e.props.isWorking ? 'this' : 'last'
     const used = await read($, refreshes)
     const { limit: autoNow, isSession } = await limitNow($)
@@ -576,8 +779,8 @@ export const register: Register = (on, options) => {
     const columns = e.props.bodyColumns
     const n = squaresFor(columns - RESERVE)
     lastSquares = n
-    const runs = layout(c, n, typed, grown)
-    const label = cacheLabel(info, t)
+    const runs = layout(shown, n, typed, grown)
+    const label = isAgentUnread ? { text: 'cache …', color: 'inactive', inverse: false } : cacheLabel(info, t)
 
     // Tooltip texts, each kept once; squares and the label point at theirs.
     const tips: BandClientProps['tips'] = []
@@ -597,16 +800,16 @@ export const register: Register = (on, options) => {
     const squares: BandClientProps['squares'] = []
     for (const run of runs) {
       for (const glyph of run.glyphs) {
-        const text = ` ${describeAdded(run, c.window, phase, isNewGlyph(glyph))} `
+        const text = ` ${describeAdded(run, shown.window, phase, isNewGlyph(glyph))} `
         squares.push({ tip: tipOf(text, run.color), x: tipLeft(squares.length, text.length, limit) })
       }
     }
 
     // The label's and the button's tooltips end where the label area begins.
     const tipBefore = (text: string) => Math.max(0, columns - LABEL_WIDTH - text.length)
-    const cacheTip = ` ${describeCache(info, t)} `
-    // The button shows only while there is a warm entry to keep alive.
-    const isWarm = info !== null && info.ttl !== null && info.touchedAt + TTL_MS[info.ttl] > t
+    const cacheTip = isAgentUnread ? " This agent's prompt cache: reading its transcript " : ` ${describeCache(info, t)} `
+    // The button shows only while there is a warm entry to keep alive, and only the main thread's: a refresh forks it.
+    const isWarm = viewing === undefined && info !== null && info.ttl !== null && info.touchedAt + TTL_MS[info.ttl] > t
     const refreshTip = info !== null && isWarm ? ` ${describeRefresh(info, t, autoNow, used, e.props.isWorking, isSession)} ` : null
 
     const band: BandClientProps = {

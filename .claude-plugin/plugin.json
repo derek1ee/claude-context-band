@@ -1,6 +1,6 @@
 {
   "name": "context-band",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Context-window squares by category above the prompt, with a prompt-cache countdown and an optional keep-warm refresh. Reads the context breakdown, the prompt draft's length and the session transcript's cache usage, all locally; a refresh (manual, or auto-refresh if enabled) sends one model request through Claude Code. Inside Herdr, it also flashes the session's entry in Herdr's agent list as the cache nears expiry, through the local herdr command.",
   "author": {
     "name": "Derek Li",
@@ -26,7 +26,7 @@
     "herdr": {
       "type": "boolean",
       "title": "Flash in Herdr's agent list",
-      "description": "Inside Herdr (herdr.dev), flash this session's entry in Herdr's agent list with the countdown through a 1h cache's last 5 minutes, by renaming the entry for each beat through the herdr command. Does nothing outside Herdr. /context-band herdr on|off sets this too.",
+      "description": "Inside Herdr (herdr.dev), flash this session's entry in Herdr's agent list with the countdown through a 1h cache's last 5 minutes, through the herdr command: its name flashes, or, after /context-band herdr setup, a coloured countdown beside it. Does nothing outside Herdr. /context-band herdr on|off sets this too.",
       "default": true
     }
   },

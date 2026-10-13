@@ -90,11 +90,11 @@ describe('cache', () => {
       '{"type":"user","message":{"content":"hi"}}',
       '',
     ].join('\n')
-    expect(parseTail(tail)).toEqual({ ttl: '1h', at: Date.parse('2026-10-06T00:02:00.000Z') })
+    expect(parseTail(tail)).toMatchObject({ ttl: '1h', at: Date.parse('2026-10-06T00:02:00.000Z') })
   })
 
   test('nothing written yet leaves the TTL unknown', () => {
-    expect(parseTail(row('2026-10-06T00:00:00.000Z', null))).toEqual({
+    expect(parseTail(row('2026-10-06T00:00:00.000Z', null))).toMatchObject({
       ttl: null,
       at: Date.parse('2026-10-06T00:00:00.000Z'),
     })

@@ -23,6 +23,14 @@ export type CacheInfo = {
   ttl: CacheTtl | null
 }
 
+/** An agent's own prompt cache and context, for the band while its transcript is in view. */
+export type AgentCache = {
+  /** Its cache, as the main thread's: from its requests, its TTL from its own transcript. */
+  cache: CacheInfo | null
+  /** Its context at its newest response, in tokens; null until one is seen. */
+  tokens: number | null
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'context-band': {
@@ -39,6 +47,8 @@ declare module 'claude-code' {
       sessionLimit: number | null
       /** Each category's tokens when the current or last turn began, by name; null before any turn. */
       baseline: Record<string, number> | null
+      /** Each agent's cache and context the band has seen, by the id its events carry. */
+      agents: Record<string, AgentCache>
     }
   }
 }

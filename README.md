@@ -44,8 +44,9 @@ Squares, glyphs and colours follow `/context` exactly, with as many squares as f
 ## Cache countdown
 
 - **Expiry** = start of the last main-thread API request + TTL. A request that reads the cache restarts its timer, and the timer runs from when the request starts. Subagent requests don't count.
-- **TTL** comes from the transcript: each response's `usage.cache_creation` splits written tokens into `ephemeral_1h_input_tokens` and `ephemeral_5m_input_tokens`. If you pin the TTL yourself (`FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, or `"promptCacheTtl"` in settings), the label shows it from the first request. Otherwise the label reads `no cache yet` before your first prompt, then `cache …` until the first response is saved (a second or two), rather than counting down against a guess. Claude Code's automatic TTL is 1h on a Claude subscription within its usage limits and 5m on an API key, Bedrock, Vertex or Foundry. A drop to 5m mid-session (going past usage limits) is picked up at the end of that turn.
+- **TTL** comes from the transcript: each response's `usage.cache_creation` splits written tokens into `ephemeral_1h_input_tokens` and `ephemeral_5m_input_tokens`. If you pin the TTL yourself (`FORCE_PROMPT_CACHING_5M`, `CLAUDE_CODE_PROMPT_CACHE_TTL`, or `"promptCacheTtl"` in settings), the label shows it from the first request. Otherwise the label reads `no cache yet` before your first prompt, then `cache …` until the first response is saved (a second or two), rather than counting down against a guess. Claude Code's automatic TTL is 1h on a Claude subscription within its usage limits and 5m on an API key, Bedrock, Vertex or Foundry. The label rereads the TTL after every request, so a drop to 5m mid-session (past your usage limits, on usage credit) shows a second or two after the next response, and so does the return to 1h.
 - Green `1h-cache 52:13` while warm, yellow in the last 20%, then red `cache expired 36m ago` (rough: `<1m`, minutes, hours, days). A 1h cache also flashes through its last five minutes.
+- **Agents:** open a background agent's transcript from the tasks list under the prompt, and the band shows that agent. Its squares show its context as one run (Claude Code gives no per-category breakdown for an agent), and the label counts down its own cache. Subagents write to a cache of their own, 5m by default (`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` or `"subagentPromptCacheTtl"` changes it). The `↻ (n)` button hides there, since a refresh warms the main conversation's cache. Back on `main`, the band shows the main conversation again.
 
 ## Keeping the cache warm
 
@@ -73,14 +74,26 @@ Setting a session's count starts its allowance over. A session's own count lasts
 
 ## Herdr
 
-Inside [Herdr](https://herdr.dev), the session's entry in Herdr's agent list flashes along with the label through a 1h cache's last five minutes. On each beat its name reads `claude ⚠ 1h-cache 4:58`, and between beats it's back to Herdr's own. Entries the cache isn't about to expire for are left alone, and there's no Herdr setup to do.
+Inside [Herdr](https://herdr.dev), the session's entry in Herdr's agent list flashes along with the label through a 1h cache's last five minutes. Entries whose cache isn't about to expire are left alone.
 
-The band finds Herdr from the `HERDR_ENV` and `HERDR_PANE_ID` variables Herdr sets in each pane. Outside Herdr it does nothing. It renames the entry through the `herdr` command, and each name it sets expires within two seconds, so a name is never left behind if Claude Code quits mid-flash.
+Out of the box, with no Herdr setup, the entry's name flashes: on each beat it reads `claude ⚠ 1h-cache 4:58`, and between beats it's back to Herdr's own name.
+
+For colour, run `/context-band herdr setup`. Herdr shows a value the band reports only where its own config places it, and colours it there, so setup adds a row for Claude entries to Herdr's `config.toml`. From then on the countdown sits after the entry's name, yellow, and turns red and bold with a `⚠` on each beat:
 
 ```
-/context-band herdr            # where it stands, and this session's pane
-/context-band herdr preview    # flash the entry for 30 seconds, counting down from 5:00
-/context-band herdr off        # leave Herdr alone (on turns it back on)
+● my-project · 8
+claude · ⚠ 1h-cache 4:58
+```
+
+Setup saves a backup of the old file, has Herdr check the new one (and puts the old one back if Herdr rejects it), then reloads Herdr. If your config already lays out the agent list, setup leaves the file alone and prints the entry to add to your own row. `/context-band herdr setup remove` takes the rows out again. The colours are the default theme's (Catppuccin Mocha), and you can edit them in the file.
+
+The band finds Herdr from the `HERDR_ENV` and `HERDR_PANE_ID` variables Herdr sets in each pane. Outside Herdr it does nothing. It talks to Herdr through the `herdr` command, and each name or value it sets expires within two seconds, so nothing is left behind if Claude Code quits mid-flash.
+
+```
+/context-band herdr                 # where it stands, and this session's pane
+/context-band herdr preview         # flash the entry for 30 seconds, counting down from 5:00
+/context-band herdr setup [remove]  # add (or take out) the coloured countdown in Herdr's config
+/context-band herdr off             # leave Herdr alone (on turns it back on)
 ```
 
 `off` and `on` set the "Flash in Herdr's agent list" row in `/config`.
@@ -97,7 +110,7 @@ The plugin reads Claude Code's own context breakdown (local estimates, no extra 
 
 The one exception is a cache refresh, whether you trigger it with `↻ (n)`, with `/context-band refresh`, or through auto-refresh if you turn that on. A refresh sends one model request through Claude Code's own client. That request re-sends your current conversation, just as Claude Code does on every turn.
 
-Inside Herdr, the band also runs the local `herdr` command. It reads the agent's name and sets or clears the entry's displayed name. That only happens while the entry is flashing, and nothing else is sent.
+Inside Herdr, the band also runs the local `herdr` command. While the entry is flashing, it reads Herdr's config and the agent's name, and sets or clears the entry's name or countdown. Only `/context-band herdr setup` writes to Herdr's config, and only when you run it.
 
 ## Develop
 
